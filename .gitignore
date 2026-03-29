@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Runtime persistence (db, browser profile, attachments)
+.persistence/
+
+# debugging
+.dm_bot_debug
+
+# pytest_cache
+.pytest_cache/
+
+# mypy cache
+.mypy_cache/
+
+.vscode
+
+.hypothesis/
+
+.claude
+
+.env
