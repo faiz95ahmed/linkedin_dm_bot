@@ -6,7 +6,7 @@ A Python automation bot for LinkedIn Messaging that extracts conversations, mess
 
 - Uses the LinkedIn **mobile web UI** (iPhone 5/SE 320×568 viewport, iOS 10 UA) — simpler DOM, fewer anti-bot measures
 - Navigates via **ARIA roles and accessible names**, not CSS selectors
-- Runs **headful** so you can intervene at security checkpoints
+- Runs **headless by default**, falling back to a visible browser automatically if a navigation error or checkpoint is detected
 - Stores everything in **SQLite** for idempotent, incremental syncing
 - Built-in **rate limiting** with random human-like delays
 
@@ -36,7 +36,7 @@ LI_PASS=your_password
 DM_BOT_PROFILE_PATH=.persistence/browser_profile
 DM_BOT_DB_PATH=.persistence/dm_bot.db
 DM_BOT_LOG_LEVEL=INFO
-DM_BOT_HEADLESS=false
+DM_BOT_HEADLESS=true
 DM_BOT_DELAY_MIN=2.0
 DM_BOT_DELAY_MAX=5.0
 DM_BOT_MAX_ACTIONS_PER_MINUTE=20
@@ -78,7 +78,6 @@ uv run dm-bot sync --limit 10 --since 2025-01-01
 - `--limit, -l N` — max conversations to process (default: 50)
 - `--since, -s DATE` — ISO date filter on `last_message_at` (default: 30 days ago)
 - `--profile, -p PATH` — custom browser profile directory
-- `--headless` — run headless (not recommended; prevents checkpoint intervention)
 
 **What it does per conversation:**
 1. Extracts messages via DOM (Layout A or Layout B depending on LinkedIn render)
@@ -123,6 +122,59 @@ uv run dm-bot dump                                    # all messages (up to 100)
 uv run dm-bot dump --conversation john-doe-12345      # filter by connection slug
 uv run dm-bot dump --limit 500
 ```
+
+### `dm-bot inbox`
+
+List recent conversations, sorted by last message time.
+
+```bash
+uv run dm-bot inbox              # conversations active in the last 7 days
+uv run dm-bot inbox --since 14   # last 14 days
+```
+
+**Options:**
+- `--since, -s N` — number of days to look back (default: 7)
+
+### `dm-bot conversation`
+
+Print the full message thread for a conversation.
+
+```bash
+uv run dm-bot conversation <id>
+```
+
+The `<id>` is the connection slug shown in `inbox` output.
+
+### `dm-bot find`
+
+Search for a conversation by contact name.
+
+```bash
+uv run dm-bot find "Jane Smith"
+uv run dm-bot find jane            # partial match
+```
+
+### `dm-bot get-url`
+
+Get the LinkedIn thread URL for a conversation by connection slug.
+
+```bash
+uv run dm-bot get-url <id>
+```
+
+### `dm-bot send-message`
+
+Send a message to a conversation, with an optional file attachment.
+
+```bash
+uv run dm-bot send-message <id> "Your message here"
+uv run dm-bot send-message <id> "Please find my CV attached" --attachment /path/to/file.docx
+```
+
+**Options:**
+- `--attachment, -a PATH` — path to a file to attach (e.g. a PDF or DOCX)
+
+After sending, the conversation is automatically re-synced so the outbound message appears in the local database.
 
 ### `dm-bot dump-tree`
 
@@ -173,8 +225,8 @@ Deduplication key: `SHA256(conversation_id | content | direction)` — re-syncin
 - Keep the browser open until you see "Login successful"
 
 **Sync stops with checkpoint**
-- Complete the checkpoint in the browser window
-- Press Ctrl+C, then re-run `sync`
+- The bot will automatically relaunch with a visible browser when it detects a checkpoint
+- Complete the checkpoint in the browser window, then the flow will retry automatically
 
 **Rate limiting**
 - Increase `DM_BOT_DELAY_MIN` / `DM_BOT_DELAY_MAX` in `.env`
