@@ -284,6 +284,17 @@ SQLite at `~/CAREER/career.db`. Schema:
 | `lead`    | Companies/roles (status, salary band, source, notes)               |
 | `process` | Interview stages per lead (stage type, scheduled time, outcome)    |
 
+## Email Integration
+
+This project works best when paired with a CLI tool for sending and reading email, since many recruiter workflows move from LinkedIn to email for scheduling calls, sharing JDs, and follow-ups.
+
+We use [gws](https://github.com/nicholasgasior/gws) — a CLI wrapper around Google Workspace APIs — for Gmail and Google Calendar access. Any tool that lets you send/read email from the command line would work, but the workflows in `CLAUDE.md` assume `gws` is available.
+
+Key capabilities this enables:
+- **Sending CVs and follow-ups via email** when a recruiter provides their address
+- **Reading inbound JDs and scheduling emails** without leaving the terminal
+- **Calendar integration** for checking availability and booking interview slots
+
 ## Troubleshooting
 
 **Login / checkpoint issues**
