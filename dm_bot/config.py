@@ -6,6 +6,7 @@ import time
 import asyncio
 import logging
 import sys
+import uuid
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
@@ -127,7 +128,9 @@ CHECKPOINT_PATTERNS: list[str] = [
 LOG_LEVEL: str = os.getenv("DM_BOT_LOG_LEVEL", "INFO")
 LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 LOG_DATE_FORMAT: str = "%Y-%m-%d %H:%M:%S"
-LOG_FILE: Optional[str] = os.getenv("DM_BOT_LOG_FILE", "dm_bot.log")
+
+def _generate_run_id() -> str:
+    return str(uuid.uuid4())
 
 
 # ============================================================================
@@ -252,6 +255,42 @@ class RateLimiter:
 # Utility Functions
 # ============================================================================
 
+BLOCKED_FLAG_PATH: Path = _PERSISTENCE_DIR / "blocked.json"
+
+
+class BlockedFlag:
+    """Tracks whether the bot is blocked by LinkedIn (checkpoint/login failure).
+
+    Persists state as a JSON file so that subsequent runs can skip the headless
+    attempt and go straight to non-headless mode.
+    """
+
+    def __init__(self, path: Path = BLOCKED_FLAG_PATH) -> None:
+        self._path = path
+
+    def is_set(self) -> bool:
+        return self._path.exists()
+
+    def set(self, reason: str) -> None:
+        import json
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps({"reason": reason}))
+
+    def clear(self) -> None:
+        if self._path.exists():
+            self._path.unlink()
+
+    def reason(self) -> Optional[str]:
+        if not self._path.exists():
+            return None
+        import json
+        try:
+            data = json.loads(self._path.read_text())
+            return data.get("reason")
+        except Exception:
+            return None
+
+
 def calculate_backoff_delay(attempt: int) -> float:
     """
     Calculate exponential backoff delay (Requirement 5.2).
@@ -266,81 +305,74 @@ def calculate_backoff_delay(attempt: int) -> float:
 
 
 def setup_logging(
+    command: str = "unknown",
     log_level: Optional[str] = None,
-    log_file: Optional[str] = None,
     log_format: Optional[str] = None,
     log_date_format: Optional[str] = None,
-) -> None:
+    db_path: Optional[Path] = None,
+) -> str:
     """
-    Configure Python logging with file and console handlers.
-    
+    Configure Python logging with console and SQLite handlers.
+
     Sets up logging with:
     - Console handler (stdout) for all log levels
-    - File handler for persistent logs
+    - SQLiteHandler for persistent logs in the dm_bot database
     - Consistent timestamp format: "YYYY-MM-DD HH:MM:SS"
-    
+
     Args:
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
-                  Defaults to LOG_LEVEL from config.
-        log_file: Path to log file. Defaults to LOG_FILE from config.
+        command: Name of the CLI command being run (stored in log table).
+        log_level: Logging level. Defaults to LOG_LEVEL from config.
         log_format: Log message format. Defaults to LOG_FORMAT from config.
         log_date_format: Timestamp format. Defaults to LOG_DATE_FORMAT from config.
-    
-    Requirements:
-        - 8.1: Log action name, type, and target element at INFO level
-        - 8.2: Log failures at WARNING level with retry attempt number
-        - 8.3: Log checkpoint detection at ERROR level with URL
-        - 8.4: Log configuration parameters at INFO level on startup
-        - 8.5: Include timestamps in format "YYYY-MM-DD HH:MM:SS"
+        db_path: Path to the SQLite database. Defaults to DB_PATH from config.
+
+    Returns:
+        The generated run_id for this invocation.
     """
-    # Use defaults from config if not provided
+    from dm_bot.log_handler import SQLiteHandler
+
     if log_level is None:
         log_level = LOG_LEVEL
-    if log_file is None:
-        log_file = LOG_FILE
     if log_format is None:
         log_format = LOG_FORMAT
     if log_date_format is None:
         log_date_format = LOG_DATE_FORMAT
-    
-    # Convert string log level to logging constant
+    if db_path is None:
+        db_path = DB_PATH
+
+    run_id = _generate_run_id()
+
     numeric_level = getattr(logging, log_level.upper(), logging.INFO)
-    
-    # Create formatter with timestamp format (Requirement 8.5)
-    formatter = logging.Formatter(
-        fmt=log_format,
-        datefmt=log_date_format,
-    )
-    
-    # Get root logger
+
+    formatter = logging.Formatter(fmt=log_format, datefmt=log_date_format)
+
     root_logger = logging.getLogger()
     root_logger.setLevel(numeric_level)
-    
-    # Remove existing handlers to avoid duplicates
     root_logger.handlers.clear()
-    
-    # Create console handler (stdout)
+
+    # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(numeric_level)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
-    
-    # Create file handler if log_file is specified
-    if log_file:
-        try:
-            file_handler = logging.FileHandler(log_file, mode='a')
-            file_handler.setLevel(numeric_level)
-            file_handler.setFormatter(formatter)
-            root_logger.addHandler(file_handler)
-        except Exception as e:
-            # Log to console if file handler creation fails
-            root_logger.error(f"Failed to create file handler for {log_file}: {e}")
-    
-    # Log startup configuration (Requirement 8.4)
+
+    # SQLite handler
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        sqlite_handler = SQLiteHandler(db_path=db_path, run_id=run_id, command=command)
+        sqlite_handler.setLevel(numeric_level)
+        sqlite_handler.setFormatter(formatter)
+        root_logger.addHandler(sqlite_handler)
+    except Exception as e:
+        root_logger.error(f"Failed to create SQLite log handler: {e}")
+
     root_logger.info("=" * 60)
     root_logger.info("DM Bot Logging Initialized")
     root_logger.info(f"Log Level: {log_level}")
-    root_logger.info(f"Log File: {log_file}")
+    root_logger.info(f"Run ID: {run_id}")
+    root_logger.info(f"Command: {command}")
     root_logger.info(f"Timestamp Format: {log_date_format}")
     root_logger.info("=" * 60)
+
+    return run_id
 

@@ -17,6 +17,7 @@ import typer
 
 from dm_bot.browser import BrowserManager, run_with_headless_fallback
 from dm_bot.config import (
+    BlockedFlag,
     LI_PASS,
     LI_USER,
     PROFILE_PATH,
@@ -188,8 +189,8 @@ def login(
     Requirement 1.1: Load credentials from environment variables
     """
     # Set up logging
-    setup_logging()
-    
+    setup_logging(command="login")
+
     logger.info("Starting login command")
     
     # Validate credentials
@@ -323,8 +324,8 @@ def navigate(
         - 2.5: Proceed to messaging after successful login
     """
     # Set up logging
-    setup_logging()
-    
+    setup_logging(command="navigate")
+
     logger.info("Starting navigate command")
     
     # Validate credentials
@@ -496,7 +497,7 @@ def sync(
         - 7.2: Respect --limit parameter
     """
     # Set up logging
-    setup_logging()
+    setup_logging(command="sync")
 
     logger.info("Starting sync command")
 
@@ -540,7 +541,8 @@ async def _sync_flow(
     """
     from dm_bot.extraction import SyncEngine
     from dm_bot.storage import DatabaseManager
-    
+
+    blocked_flag = BlockedFlag()
     browser_manager = BrowserManager()
     db: Optional[DatabaseManager] = None
     progress_reporter: Optional[ProgressReporter] = None
@@ -585,14 +587,16 @@ async def _sync_flow(
             if not success:
                 typer.echo("✗ Login failed. Please check your credentials.", err=True)
                 logger.error("Login failed")
+                blocked_flag.set("Login failed: credentials rejected or login flow broken")
+                typer.echo("Blocked flag set — next run will skip headless attempt.")
                 raise typer.Exit(code=1)
-            
+
             typer.echo("✓ Login successful!")
             logger.info("Login completed successfully")
         else:
             typer.echo("✓ Already logged in")
             logger.info("Already logged in, skipping login flow")
-        
+
         # Navigate to messaging
         logger.info("Navigating to messaging interface")
         typer.echo("Navigating to messaging...")
@@ -654,12 +658,15 @@ async def _sync_flow(
             f"Sync complete: {result.conversations_processed} conversations, "
             f"{result.messages_stored} new messages"
         )
-        
+        blocked_flag.clear()
+
     except CheckpointDetectedError as e:
         # Requirement 4.1: Handle checkpoint detection
         typer.echo(f"\n✗ Security checkpoint detected: {e}", err=True)
         logger.error(f"Checkpoint detected: {e}")
-        
+        blocked_flag.set(f"Checkpoint detected: {e}")
+        typer.echo("Blocked flag set — next run will skip headless attempt.")
+
         # Display partial results if available
         if progress_reporter:
             typer.echo("\nPartial results before checkpoint:")
@@ -742,7 +749,7 @@ def sync_conversation(
     Example:
         dm-bot sync-conversation https://www.linkedin.com/messaging/thread/2-xxx/
     """
-    setup_logging()
+    setup_logging(command="sync-conversation")
     username, password = validate_credentials()
     if profile_path is None:
         profile_path = PROFILE_PATH
@@ -849,7 +856,7 @@ def send_message(
     ),
 ) -> None:
     """Send a message to an existing conversation, then auto-sync."""
-    setup_logging()
+    setup_logging(command="send-message")
     username, password = validate_credentials()
     if profile_path is None:
         profile_path = PROFILE_PATH
@@ -983,8 +990,8 @@ def dump(
         - 6.5: Display informative message when database is empty
     """
     # Set up logging
-    setup_logging()
-    
+    setup_logging(command="dump")
+
     logger.info("Starting dump command")
     
     if conversation:
@@ -1204,7 +1211,7 @@ def dump_tree(
         - 2.4: Support --url flag
         - 2.5: Support --output flag
     """
-    setup_logging()
+    setup_logging(command="dump-tree")
     logger.info(f"Starting dump-tree command for URL: {url}")
     
     # Use default URL if not provided
@@ -1286,6 +1293,7 @@ def inbox(
     ),
 ) -> None:
     """List all conversations with last message summary."""
+    setup_logging(command="inbox")
     from dm_bot.storage import DatabaseManager
 
     db = DatabaseManager()
@@ -1340,6 +1348,7 @@ def conversation(
     conversation_id: int = typer.Argument(..., help="Conversation ID"),
 ) -> None:
     """Print the full message thread for a conversation."""
+    setup_logging(command="conversation")
     from dm_bot.storage import DatabaseManager, ConversationRepository, MessageRepository
 
     db = DatabaseManager()
@@ -1387,6 +1396,7 @@ def get_url(
     conversation_id: int = typer.Argument(..., help="Conversation ID"),
 ) -> None:
     """Print the thread URL for a conversation."""
+    setup_logging(command="get-url")
     from dm_bot.storage import DatabaseManager, ConversationRepository
 
     db = DatabaseManager()
@@ -1411,6 +1421,7 @@ def find(
     name: str = typer.Argument(..., help="Name to search for (case-insensitive)"),
 ) -> None:
     """Find conversations by contact name."""
+    setup_logging(command="find")
     from dm_bot.storage import DatabaseManager
 
     db = DatabaseManager()
@@ -1439,6 +1450,116 @@ def find(
             typer.echo(f"{conv_id:<6} {name_str:<40} {date_str}")
     except Exception as e:
         typer.echo(f"✗ Error: {e}", err=True)
+        raise typer.Exit(code=1)
+    finally:
+        db.close()
+
+
+@app.command()
+def logs(
+    limit: int = typer.Option(50, "--limit", "-l", help="Max log entries to show"),
+    level: Optional[str] = typer.Option(None, "--level", help="Filter by log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"),
+    module: Optional[str] = typer.Option(None, "--module", help="Filter by module name"),
+    command: Optional[str] = typer.Option(None, "--command", help="Filter by CLI command name"),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run ID"),
+    since: Optional[datetime] = typer.Option(None, "--since", help="Show logs after this datetime", formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"]),
+    until: Optional[datetime] = typer.Option(None, "--until", help="Show logs before this datetime", formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"]),
+    errors_only: bool = typer.Option(False, "--errors-only", "-e", help="Show only ERROR and CRITICAL entries"),
+    runs: bool = typer.Option(False, "--runs", help="List recent runs instead of individual log entries"),
+) -> None:
+    """Query the structured log table."""
+    from dm_bot.storage import DatabaseManager
+
+    db = DatabaseManager()
+    try:
+        conn = db.connect()
+
+        if runs:
+            # Show a summary of recent runs
+            query = """
+                SELECT run_id, command, MIN(ts) AS started, MAX(ts) AS ended,
+                       COUNT(*) AS entries,
+                       SUM(CASE WHEN level_no >= 40 THEN 1 ELSE 0 END) AS errors
+                FROM log
+            """
+            conditions: list[str] = []
+            params: list = []
+            if command:
+                conditions.append("command = ?")
+                params.append(command)
+            if since:
+                conditions.append("ts >= ?")
+                params.append(since.strftime("%Y-%m-%d %H:%M:%S"))
+            if until:
+                conditions.append("ts <= ?")
+                params.append(until.strftime("%Y-%m-%d %H:%M:%S"))
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " GROUP BY run_id ORDER BY started DESC LIMIT ?"
+            params.append(limit)
+
+            rows = conn.execute(query, params).fetchall()
+            if not rows:
+                typer.echo("No runs found.")
+                return
+
+            typer.echo(f"{'Run ID':<38} {'Command':<20} {'Started':<22} {'Ended':<22} {'Entries':>8} {'Errors':>8}")
+            typer.echo("─" * 120)
+            for row in rows:
+                rid, cmd, started, ended, entries, errors_count = row
+                typer.echo(f"{rid:<38} {cmd:<20} {str(started):<22} {str(ended):<22} {entries:>8} {errors_count:>8}")
+            return
+
+        # Show individual log entries
+        query = "SELECT ts, level, logger, module, func, lineno, message, exc_text, run_id, command FROM log"
+        conditions = []
+        params = []
+
+        if level:
+            conditions.append("level = ?")
+            params.append(level.upper())
+        if errors_only:
+            conditions.append("level_no >= 40")
+        if module:
+            conditions.append("module = ?")
+            params.append(module)
+        if command:
+            conditions.append("command = ?")
+            params.append(command)
+        if run_id:
+            conditions.append("run_id = ?")
+            params.append(run_id)
+        if since:
+            conditions.append("ts >= ?")
+            params.append(since.strftime("%Y-%m-%d %H:%M:%S"))
+        if until:
+            conditions.append("ts <= ?")
+            params.append(until.strftime("%Y-%m-%d %H:%M:%S"))
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY ts DESC LIMIT ?"
+        params.append(limit)
+
+        rows = conn.execute(query, params).fetchall()
+        if not rows:
+            typer.echo("No log entries found.")
+            return
+
+        for row in reversed(rows):
+            ts, lvl, lgr, mod, func, lineno, message, exc_text, rid, cmd = row
+            header = f"[{ts}] {lvl:<8} {mod}:{func}:{lineno}  (cmd={cmd})"
+            typer.echo(header)
+            typer.echo(f"  {message}")
+            if exc_text:
+                for line in exc_text.strip().split("\n"):
+                    typer.echo(f"  {line}")
+            typer.echo("")
+
+        typer.echo(f"({len(rows)} entries shown)")
+
+    except Exception as e:
+        typer.echo(f"✗ Error querying logs: {e}", err=True)
         raise typer.Exit(code=1)
     finally:
         db.close()

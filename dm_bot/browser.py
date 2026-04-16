@@ -14,6 +14,7 @@ from playwright.async_api import (
 )
 
 from dm_bot.config import (
+    BlockedFlag,
     HEADLESS,
     PROFILE_PATH,
     USER_AGENT,
@@ -47,6 +48,9 @@ async def run_with_headless_fallback(
     non-headless, and the flow is retried once.  On the second failure the
     error is logged and execution stops (no exception is re-raised).
 
+    If the blocked flag is set (from a previous failed run), the headless
+    attempt is skipped entirely and the flow goes straight to non-headless.
+
     Args:
         flow_fn: Async function implementing the browser flow.
         profile_path: Browser profile path forwarded to the flow.
@@ -54,7 +58,17 @@ async def run_with_headless_fallback(
         **kwargs: Keyword arguments forwarded to flow_fn (must NOT include
                   ``headless`` or ``profile_path`` — those are managed here).
     """
-    for attempt, headless in enumerate([True, False]):
+    flag = BlockedFlag()
+
+    if flag.is_set():
+        reason = flag.reason() or "unknown"
+        logger.warning(f"Blocked flag is set ({reason}), skipping headless attempt")
+        typer.echo(f"⚠ Blocked flag set ({reason}). Starting non-headless directly.")
+        attempts = [(1, False)]
+    else:
+        attempts = [(0, True), (1, False)]
+
+    for attempt, headless in attempts:
         try:
             await flow_fn(*args, profile_path=profile_path, headless=headless, **kwargs)
             return
@@ -83,6 +97,8 @@ async def run_with_headless_fallback(
                     f"({error_name}: {e}). Stopping.",
                     err=True,
                 )
+                flag.set(f"Non-headless failed: {error_name}: {e}")
+                typer.echo("Blocked flag set — next run will skip headless attempt.")
                 return
             else:
                 # Non-navigation error on first attempt — re-raise immediately

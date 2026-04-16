@@ -31,3 +31,5 @@ wheels/
 
 # macOS
 .DS_Store
+
+.agent-py

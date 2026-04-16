@@ -235,6 +235,28 @@ class DatabaseManager:
 
         -- Index for fetching attachments by message
         CREATE INDEX IF NOT EXISTS idx_attachment_message_id ON attachment(message_id);
+
+        -- Log table: stores structured log records for CLI runs
+        CREATE TABLE IF NOT EXISTS log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            command TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            level TEXT NOT NULL,
+            level_no INTEGER NOT NULL,
+            logger TEXT NOT NULL,
+            module TEXT NOT NULL,
+            func TEXT NOT NULL,
+            lineno INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            exc_text TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_log_run_id ON log(run_id);
+        CREATE INDEX IF NOT EXISTS idx_log_ts ON log(ts);
+        CREATE INDEX IF NOT EXISTS idx_log_level_no ON log(level_no);
+        CREATE INDEX IF NOT EXISTS idx_log_logger ON log(logger);
+        CREATE INDEX IF NOT EXISTS idx_log_command ON log(command);
     """
 
     def __init__(self, db_path: Path | None = None) -> None:

@@ -2023,9 +2023,10 @@ class SyncEngine:
                     result.messages_stored += stored
                     result.messages_skipped += skipped
 
-                    if stored == 0:
-                        logger.info("No new messages in this conversation; stopping early.")
-                        break
+                    # TODO: re-enable early exit once inbox ordering is reliable
+                    # if stored == 0:
+                    #     logger.info("No new messages in this conversation; stopping early.")
+                    #     break
 
                 except Exception as e:
                     error_msg = f"Error syncing conversation '{preview.connection_name}': {e}"
