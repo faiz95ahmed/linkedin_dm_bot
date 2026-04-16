@@ -1,6 +1,6 @@
 # LinkedIn DM Bot
 
-A Python automation bot for LinkedIn Messaging that extracts conversations, messages, and attachments to a local SQLite database.
+A Python automation bot for LinkedIn Messaging that extracts conversations, messages, and attachments to a local SQLite database. Includes a companion career manager CLI for tracking recruiter leads and interview pipelines.
 
 ## Approach
 
@@ -176,6 +176,18 @@ uv run dm-bot send-message <id> "Please find my CV attached" --attachment /path/
 
 After sending, the conversation is automatically re-synced so the outbound message appears in the local database.
 
+### `dm-bot logs`
+
+Query the structured log table (logs are persisted to SQLite alongside the message database).
+
+```bash
+uv run dm-bot logs                              # recent log entries
+uv run dm-bot logs --runs                       # summary of recent CLI runs
+uv run dm-bot logs --command sync --limit 20    # filter by command
+uv run dm-bot logs --errors-only                # only ERROR/CRITICAL
+uv run dm-bot logs --run-id <uuid>              # entries for a specific run
+```
+
 ### `dm-bot dump-tree`
 
 Capture the accessibility tree snapshot for a LinkedIn URL and save it as JSON to `.dm_bot_debug/`. Used during development to understand LinkedIn's DOM structure.
@@ -207,6 +219,7 @@ SQLite at `.persistence/dm_bot.db`. Schema:
 | `conversation` | Message threads (connection FK, thread URL, sync timestamps) |
 | `message`      | Individual messages (content, timestamp, direction, dedup key) |
 | `attachment`   | Files linked to messages (path on disk, original filename, size) |
+| `log`          | Structured log entries (run_id, command, level, message, exc_text) |
 
 Deduplication key: `SHA256(conversation_id | content | direction)` — re-syncing the same message is always a no-op.
 
@@ -217,6 +230,59 @@ Deduplication key: `SHA256(conversation_id | content | direction)` — re-syncin
 | Delay between actions  | 2–5s    | `DM_BOT_DELAY_MIN/MAX`       |
 | Max actions per minute | 20      | `DM_BOT_MAX_ACTIONS_PER_MINUTE` |
 | Post-page-load wait    | 1.5–3s  | —                            |
+
+## Career Manager
+
+A companion CLI (`career`) for tracking recruiter leads and interview pipelines. Designed to work alongside `dm-bot` — when a recruiter reaches out on LinkedIn, you create a lead and track the process through to offer/decline.
+
+### Setup
+
+The career manager expects a directory at `~/CAREER/` (hardcoded for now — TODO: make this a config variable). The SQLite database is created automatically at `~/CAREER/career.db`.
+
+### `career pipeline`
+
+Dashboard of all active leads with their latest interview stage.
+
+```bash
+uv run career pipeline
+```
+
+### `career lead`
+
+CRUD operations for recruiter leads.
+
+```bash
+uv run career lead create --company "Acme Corp" --role "Senior Engineer" --source linkedin --source-ref 42 --salary-min 120 --salary-max 150 --notes "Via recruiter Jane"
+uv run career lead list                          # all leads
+uv run career lead list --status active          # filter by status
+uv run career lead show <id>                     # full details + process stages
+uv run career lead update <id> --status declined --notes "Role filled"
+```
+
+**Lead statuses:** `active`, `declined`, `on_hold`, `closed`, `offer_accepted`
+
+### `career process`
+
+Track interview stages for a lead.
+
+```bash
+uv run career process add <lead_id> --stage recruiter_screen --scheduled 2025-04-21T14:00:00 --notes "30 min intro"
+uv run career process list <lead_id>
+uv run career process update <process_id> --status completed --outcome "Moving to technical"
+```
+
+**Stages:** `initial_call`, `recruiter_screen`, `hiring_manager`, `technical_interview`, `take_home`, `onsite`, `final_round`, `offer`, `negotiation`
+
+**Process statuses:** `upcoming`, `completed`, `cancelled`, `rescheduled`, `no_show`
+
+### Database
+
+SQLite at `~/CAREER/career.db`. Schema:
+
+| Table     | Description                                                        |
+|-----------|--------------------------------------------------------------------|
+| `lead`    | Companies/roles (status, salary band, source, notes)               |
+| `process` | Interview stages per lead (stage type, scheduled time, outcome)    |
 
 ## Troubleshooting
 
