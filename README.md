@@ -284,6 +284,25 @@ SQLite at `~/CAREER/career.db`. Schema:
 | `lead`    | Companies/roles (status, salary band, source, notes)               |
 | `process` | Interview stages per lead (stage type, scheduled time, outcome)    |
 
+## Resume Builder
+
+The recruiter workflow relies on [resume-build](https://github.com/faiz95ahmed/resume-builder) — a CLI tool that generates `.docx` resumes from a JSON source of truth. This enables tailoring CVs per opportunity without maintaining multiple Word documents by hand.
+
+```bash
+# Install globally
+uv tool install git+ssh://git@github.com/faiz95ahmed/resume-builder
+
+# Build a DOCX from JSON
+resume-build build ~/CAREER/resume.json ~/CAREER/resume.docx
+
+# Tailor for a specific role: copy, edit the JSON, then build
+cp ~/CAREER/resume.json ~/CAREER/resume_acme.json
+# ... edit resume_acme.json to emphasise relevant experience ...
+resume-build build ~/CAREER/resume_acme.json ~/CAREER/resume_acme.docx
+```
+
+The canonical untailored resume lives at `~/CAREER/resume.json`. Tailored variants follow the pattern `resume_<descriptor>.json` / `resume_<descriptor>.docx`.
+
 ## Email Integration
 
 This project works best when paired with a CLI tool for sending and reading email, since many recruiter workflows move from LinkedIn to email for scheduling calls, sharing JDs, and follow-ups.
