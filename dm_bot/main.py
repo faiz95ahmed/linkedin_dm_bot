@@ -540,7 +540,7 @@ async def _sync_flow(
     Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 4.1, 4.2, 4.3, 4.4
     """
     from dm_bot.extraction import SyncEngine
-    from dm_bot.storage import DatabaseManager
+    from dm_bot.storage import DatabaseManager, SyncRepository
 
     blocked_flag = BlockedFlag()
     browser_manager = BrowserManager()
@@ -659,6 +659,9 @@ async def _sync_flow(
             f"{result.messages_stored} new messages"
         )
         blocked_flag.clear()
+
+        # Record successful sync
+        SyncRepository(db).record("linkedin")
 
     except CheckpointDetectedError as e:
         # Requirement 4.1: Handle checkpoint detection

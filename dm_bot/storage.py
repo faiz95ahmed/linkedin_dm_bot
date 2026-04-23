@@ -257,6 +257,50 @@ class DatabaseManager:
         CREATE INDEX IF NOT EXISTS idx_log_level_no ON log(level_no);
         CREATE INDEX IF NOT EXISTS idx_log_logger ON log(logger);
         CREATE INDEX IF NOT EXISTS idx_log_command ON log(command);
+
+        -- Drop legacy flat blocklist table
+        DROP TABLE IF EXISTS email_blocklist;
+
+        -- Named blocklists
+        CREATE TABLE IF NOT EXISTS email_blocklist_name (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            created_at DATETIME NOT NULL
+        );
+
+        -- Blocklist items (patterns belonging to a named blocklist)
+        CREATE TABLE IF NOT EXISTS email_blocklist_item (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            blocklist_id INTEGER NOT NULL,
+            pattern TEXT NOT NULL,
+            created_at DATETIME NOT NULL,
+            FOREIGN KEY (blocklist_id) REFERENCES email_blocklist_name(id) ON DELETE CASCADE,
+            UNIQUE(blocklist_id, pattern)
+        );
+
+        -- Blocklist sets (named groups of blocklists)
+        CREATE TABLE IF NOT EXISTS email_blocklist_set (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            created_at DATETIME NOT NULL
+        );
+
+        -- Set membership (which blocklists belong to which sets)
+        CREATE TABLE IF NOT EXISTS email_blocklist_set_member (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            set_id INTEGER NOT NULL,
+            blocklist_id INTEGER NOT NULL,
+            FOREIGN KEY (set_id) REFERENCES email_blocklist_set(id) ON DELETE CASCADE,
+            FOREIGN KEY (blocklist_id) REFERENCES email_blocklist_name(id) ON DELETE CASCADE,
+            UNIQUE(set_id, blocklist_id)
+        );
+
+        -- Sync table: tracks when email and LinkedIn syncs were performed
+        CREATE TABLE IF NOT EXISTS sync (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sync_type TEXT NOT NULL CHECK (sync_type IN ('email', 'linkedin')),
+            sync_time DATETIME NOT NULL
+        );
     """
 
     def __init__(self, db_path: Path | None = None) -> None:
@@ -1115,3 +1159,52 @@ class AttachmentRepository:
         except sqlite3.Error as e:
             logger.error(f"Failed to get attachments by message: {e}")
             raise StorageError(f"Failed to get attachments by message: {e}") from e
+
+
+class SyncRepository:
+    """Repository for tracking sync operations."""
+
+    def __init__(self, db: DatabaseManager) -> None:
+        self._db = db
+
+    def record(self, sync_type: str) -> int:
+        """Record a sync operation.
+
+        Args:
+            sync_type: Either 'email' or 'linkedin'
+
+        Returns:
+            The id of the new sync record
+        """
+        conn = self._db.connect()
+        try:
+            cursor = conn.execute(
+                "INSERT INTO sync (sync_type, sync_time) VALUES (?, datetime('now'))",
+                (sync_type,),
+            )
+            conn.commit()
+            return cursor.lastrowid  # type: ignore[return-value]
+        except sqlite3.Error as e:
+            logger.error(f"Failed to record sync: {e}")
+            raise StorageError(f"Failed to record sync: {e}") from e
+
+    def get_last(self, sync_type: str) -> str | None:
+        """Get the timestamp of the most recent sync of a given type.
+
+        Args:
+            sync_type: Either 'email' or 'linkedin'
+
+        Returns:
+            ISO datetime string of the last sync, or None if never synced
+        """
+        conn = self._db.connect()
+        try:
+            cursor = conn.execute(
+                "SELECT sync_time FROM sync WHERE sync_type = ? ORDER BY sync_time DESC LIMIT 1",
+                (sync_type,),
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+        except sqlite3.Error as e:
+            logger.error(f"Failed to get last sync: {e}")
+            raise StorageError(f"Failed to get last sync: {e}") from e
