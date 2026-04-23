@@ -9,7 +9,7 @@ Requirements: 1.1, 2.5, 7.1, 7.2
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +38,18 @@ app = typer.Typer(
 
 # Initialize logger
 logger = logging.getLogger(__name__)
+
+# Local timezone for display
+_LOCAL_TZ = datetime.now(timezone.utc).astimezone().tzinfo
+
+
+def _utc_to_local_str(dt: datetime | str | None, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    """Convert a naive UTC datetime (or ISO string) to a local-time display string."""
+    if dt is None:
+        return ""
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt)
+    return dt.replace(tzinfo=timezone.utc).astimezone(_LOCAL_TZ).strftime(fmt)
 
 
 class ProgressReporter:
@@ -948,6 +960,9 @@ async def _send_message_flow(
         stored, skipped, extracted = await sync_engine.sync_single_conversation(preview)
         typer.echo(f"✓ Synced: {extracted} messages found, {stored} stored, {skipped} skipped")
 
+        # 5. Auto-triage: we sent this message ourselves, so mark it triaged
+        conv_repo.triage(conversation_id)
+
     except CheckpointDetectedError as e:
         typer.echo(f"✗ Security checkpoint: {e}", err=True)
         raise typer.Exit(code=1)
@@ -1139,7 +1154,7 @@ def _dump_messages(
                 recipient = connection_name[:18] + ".." if len(connection_name) > 20 else connection_name
             
             # Format date
-            date_str = msg.timestamp.strftime("%Y-%m-%d %H:%M")
+            date_str = _utc_to_local_str(msg.timestamp)
             
             # Truncate content to 100 chars - Requirement 6.1
             content = msg.content.replace("\n", " ").replace("\r", "")
@@ -1294,6 +1309,9 @@ def inbox(
     since: Optional[int] = typer.Option(
         None, "--since", "-s", help="Only show conversations with activity in last N days"
     ),
+    untriaged: bool = typer.Option(
+        False, "--untriaged", "-u", help="Only show untriaged or updated-since-triage conversations"
+    ),
 ) -> None:
     """List all conversations with last message summary."""
     setup_logging(command="inbox")
@@ -1318,10 +1336,15 @@ def inbox(
                 ORDER BY timestamp DESC LIMIT 1
             )
         """
+        conditions: list[str] = []
         params: list = []
         if since is not None:
-            query += " WHERE c.last_message_at >= datetime('now', ?)"
+            conditions.append("c.last_message_at >= datetime('now', ?)")
             params.append(f"-{since} days")
+        if untriaged:
+            conditions.append("(c.triaged_at IS NULL OR replace(c.last_message_at, 'T', ' ') > replace(c.triaged_at, 'T', ' '))")
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY c.last_message_at DESC LIMIT ?"
         params.append(limit)
 
@@ -1335,7 +1358,7 @@ def inbox(
         for row in rows:
             conv_id, name, last_at, content, direction = row
             name_str = (name or "").split("\n")[0].strip()[:28]
-            date_str = str(last_at or "")[:16]
+            date_str = _utc_to_local_str(last_at)
             arrow = "→" if direction == "outbound" else "←"
             snippet = (content or "").replace("\n", " ").strip()[:50]
             typer.echo(f"{conv_id:<6} {name_str:<30} {date_str:<20} {arrow}  {snippet}")
@@ -1381,7 +1404,7 @@ def conversation(
             return
 
         for msg in messages:
-            ts = str(msg.timestamp)[:16]
+            ts = _utc_to_local_str(msg.timestamp)
             arrow = "→ You" if msg.direction == "outbound" else f"← {name}"
             typer.echo(f"\n[{ts}] {arrow}")
             typer.echo(msg.content)
@@ -1563,6 +1586,37 @@ def logs(
 
     except Exception as e:
         typer.echo(f"✗ Error querying logs: {e}", err=True)
+        raise typer.Exit(code=1)
+    finally:
+        db.close()
+
+
+@app.command()
+def triage(
+    ids: Optional[list[int]] = typer.Argument(None, help="Conversation IDs to triage"),
+    all_untriaged: bool = typer.Option(False, "--all", "-a", help="Triage all untriaged conversations"),
+) -> None:
+    """Mark conversations as triaged."""
+    setup_logging(command="triage")
+    from dm_bot.storage import DatabaseManager, ConversationRepository
+
+    if not ids and not all_untriaged:
+        typer.echo("Provide conversation IDs or use --all.", err=True)
+        raise typer.Exit(code=1)
+
+    db = DatabaseManager()
+    db.initialize_schema()
+    try:
+        repo = ConversationRepository(db)
+        if all_untriaged:
+            count = repo.triage_all_untriaged()
+            typer.echo(f"Triaged {count} conversation(s).")
+        else:
+            assert ids is not None
+            count = repo.triage_many(ids)
+            typer.echo(f"Triaged {count} conversation(s).")
+    except Exception as e:
+        typer.echo(f"✗ Error: {e}", err=True)
         raise typer.Exit(code=1)
     finally:
         db.close()

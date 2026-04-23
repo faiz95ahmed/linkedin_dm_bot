@@ -295,21 +295,23 @@ def last_sync() -> None:
 
 @app.command()
 def fetch(
-    since: str = typer.Option(..., "--since", "-s", help="ISO datetime — fetch emails after this time"),
-    output: str = typer.Option(..., "--output", "-o", help="Output file name prefix"),
+    since: Optional[str] = typer.Option(None, "--since", "-s", help="ISO datetime — fetch emails after this time (default: last completed sync)"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output folder name (default: auto-generated)"),
     blocklist_set: str = typer.Option(..., "--blocklist-set", "-l", help="Blocklist set to use for filtering"),
     blocklist_extra: Optional[list[str]] = typer.Option(None, "--blocklist-extra", "-b", help="Extra blocklist patterns for this run"),
 ) -> None:
-    """Fetch emails since a datetime, filter blocklisted senders, write JSON."""
-    setup_logging(command="email-fetch")
+    """Fetch emails since a datetime, filter blocklisted senders, append JSON batches.
 
-    # Parse since datetime to epoch
-    since_dt = datetime.fromisoformat(since)
-    epoch = int(since_dt.timestamp())
+    Supports ongoing sync: if an ongoing sync exists, reuses its folder and start
+    time. Otherwise creates a new ongoing sync. The sync stays ongoing until
+    `collect` is run against the folder.
+    """
+    setup_logging(command="email-fetch")
 
     # Init DB and blocklist
     db = DatabaseManager()
     db.initialize_schema()
+    sync_repo = SyncRepository(db)
     blocklist_repo = EmailBlocklistRepository(db)
     patterns = blocklist_repo.get_patterns_for_set(blocklist_set)
     if blocklist_extra:
@@ -317,14 +319,56 @@ def fetch(
 
     logger.info("Blocklist set '%s': %d patterns", blocklist_set, len(patterns))
 
+    # Resolve ongoing sync or create a new one
+    ongoing = sync_repo.get_ongoing("email")
+    if ongoing is not None:
+        sync_id, sync_time, ongoing_dir = ongoing
+        if output and output != ongoing_dir:
+            typer.echo(
+                f"Warning: ignoring --output '{output}' — "
+                f"ongoing sync uses '{ongoing_dir}'",
+                err=True,
+            )
+        if since:
+            typer.echo(
+                f"Warning: ignoring --since '{since}' — "
+                f"ongoing sync started at {sync_time}",
+                err=True,
+            )
+        out_name = ongoing_dir
+        since_str = sync_time
+        typer.echo(f"Resuming ongoing sync (folder={out_name}, since={since_str})")
+    else:
+        # Determine since
+        if since:
+            since_str = since
+        else:
+            last = sync_repo.get_last("email")
+            if last is None:
+                typer.echo(
+                    "Error: no previous completed sync and --since not provided.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            since_str = last
+        # Determine output dir name
+        now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_name = output if output else f"email_{now_str}"
+        # Create ongoing sync
+        sync_id = sync_repo.start("email", out_name)
+        typer.echo(f"Started new sync (folder={out_name}, since={since_str})")
+
+    # Parse since datetime to epoch
+    since_dt = since_str if isinstance(since_str, datetime) else datetime.fromisoformat(since_str)
+    epoch = int(since_dt.timestamp())
+
     # Fetch message IDs
     query = f"after:{epoch}"
     msg_stubs = gws_list_messages(query)
     typer.echo(f"Found {len(msg_stubs)} message IDs")
 
     if not msg_stubs:
-        typer.echo("No messages found.")
-        SyncRepository(db).record("email")
+        typer.echo("No new messages found.")
         return
 
     # Fetch full messages
@@ -365,23 +409,104 @@ def fetch(
         for msg in thread["messages"]:
             msg.pop("from_email", None)
 
-    # Write files — max 10 threads per file
-    out_dir = Path(f"/tmp/email-reader/{output}")
+    # Dedup against existing batch files
+    out_dir = Path(f"/tmp/email-reader/{out_name}")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    seen: set[str] = set()
+    existing_batches = sorted(out_dir.glob("[0-9]*.json"))
+    for batch_file in existing_batches:
+        if batch_file.name == "collected.json":
+            continue
+        try:
+            data = json.loads(batch_file.read_text())
+            for thread in data:
+                tid = thread.get("threadId")
+                if tid:
+                    seen.add(tid)
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    new_threads = [t for t in thread_list if t["threadId"] not in seen]
+    dupes_skipped = len(thread_list) - len(new_threads)
+
+    if not new_threads:
+        typer.echo(
+            f"No new threads ({dupes_skipped} already in folder, "
+            f"{len(seen)} total threads in {len(existing_batches)} files)"
+        )
+        return
+
+    # Append to batch files — fill last batch if under 10, then create new ones
+    last_batch_idx = -1
+    last_batch_data: list[dict] = []
+
+    if existing_batches:
+        last_batch_file = existing_batches[-1]
+        last_batch_idx = int(last_batch_file.stem)
+        try:
+            last_batch_data = json.loads(last_batch_file.read_text())
+        except (json.JSONDecodeError, KeyError):
+            last_batch_data = []
+
+    write_cursor = 0  # index into new_threads
     files_written = 0
-    for i in range(0, len(thread_list), 10):
-        chunk = thread_list[i : i + 10]
-        out_path = out_dir / f"{files_written}.json"
-        out_path.write_text(json.dumps(chunk, indent=2, ensure_ascii=False))
+
+    # Fill the last existing batch if it has room
+    if last_batch_data and len(last_batch_data) < 10:
+        room = 10 - len(last_batch_data)
+        to_add = new_threads[:room]
+        last_batch_data.extend(to_add)
+        batch_path = out_dir / f"{last_batch_idx}.json"
+        batch_path.write_text(json.dumps(last_batch_data, indent=2, ensure_ascii=False))
+        write_cursor = len(to_add)
         files_written += 1
 
-    # Record sync
-    SyncRepository(db).record("email")
+    # Write remaining threads in new batch files
+    next_idx = last_batch_idx + 1 if last_batch_idx >= 0 else 0
+    remaining = new_threads[write_cursor:]
+    for i in range(0, len(remaining), 10):
+        chunk = remaining[i : i + 10]
+        batch_path = out_dir / f"{next_idx}.json"
+        batch_path.write_text(json.dumps(chunk, indent=2, ensure_ascii=False))
+        next_idx += 1
+        files_written += 1
 
+    total_files = len(list(out_dir.glob("[0-9]*.json")))
     typer.echo(
-        f"Done: {len(messages)} messages, {blocked_count} blocked, "
-        f"{len(threads)} threads, {files_written} files written"
+        f"Done: {len(new_threads)} new threads appended ({dupes_skipped} dupes skipped), "
+        f"{blocked_count} blocked, {files_written} files written, "
+        f"{len(seen) + len(new_threads)} total threads in {total_files} files"
     )
+
+
+@app.command()
+def pending() -> None:
+    """Show status of the ongoing email sync."""
+    db = DatabaseManager()
+    db.initialize_schema()
+    ongoing = SyncRepository(db).get_ongoing("email")
+    if ongoing is None:
+        typer.echo("No ongoing email sync.")
+        return
+
+    sync_id, sync_time, out_name = ongoing
+    out_dir = Path(f"/tmp/email-reader/{out_name}")
+    batch_files = sorted(out_dir.glob("[0-9]*.json")) if out_dir.is_dir() else []
+    thread_count = 0
+    for bf in batch_files:
+        if bf.name == "collected.json":
+            continue
+        try:
+            data = json.loads(bf.read_text())
+            thread_count += len(data)
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    typer.echo(f"Ongoing sync: {out_name}")
+    typer.echo(f"  Folder: {out_dir}/")
+    typer.echo(f"  Started: {sync_time}")
+    typer.echo(f"  Batch files: {len(batch_files)} ({thread_count} threads)")
 
 
 # =============================================================================
@@ -569,15 +694,19 @@ def set_remove(
 @app.command()
 def collect(
     folder: str = typer.Option(..., "--folder", "-f", help="Folder name under /tmp/email-reader/"),
-    thread_ids: list[str] = typer.Argument(..., help="Thread IDs to collect"),
+    thread_ids: Optional[list[str]] = typer.Argument(None, help="Thread IDs to collect"),
+    none: bool = typer.Option(False, "--none", help="Complete sync with no relevant threads"),
 ) -> None:
     """Collect specific threads from batch files into a single JSON, downloading attachments."""
+    if not thread_ids and not none:
+        typer.echo("Error: provide THREAD_IDS or --none to complete with no threads", err=True)
+        raise typer.Exit(1)
     src_dir = Path(f"/tmp/email-reader/{folder}")
     if not src_dir.is_dir():
         typer.echo(f"Error: {src_dir} does not exist", err=True)
         raise typer.Exit(1)
 
-    wanted = set(thread_ids)
+    wanted = set(thread_ids or [])
     found: list[dict] = []
 
     for json_file in sorted(src_dir.glob("*.json")):
@@ -624,6 +753,15 @@ def collect(
     out_path = src_dir / "collected.json"
     out_path.write_text(json.dumps(found, indent=2, ensure_ascii=False))
     typer.echo(f"Wrote {len(found)} threads to {out_path} ({att_count} attachments downloaded)")
+
+    # Complete ongoing sync if one matches this folder
+    db = DatabaseManager()
+    db.initialize_schema()
+    sync_repo = SyncRepository(db)
+    ongoing = sync_repo.get_ongoing("email")
+    if ongoing is not None and ongoing[2] == folder:
+        sync_repo.complete(ongoing[0])
+        typer.echo(f"Marked sync '{folder}' as completed.")
 
 
 @app.command("download-attachments")

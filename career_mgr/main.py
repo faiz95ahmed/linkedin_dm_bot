@@ -1,7 +1,15 @@
 """CLI entry point for career lead tracking."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
+
+# Local timezone for display
+_LOCAL_TZ = datetime.now(timezone.utc).astimezone().tzinfo
+
+
+def _utc_to_local(dt: datetime) -> datetime:
+    """Convert naive UTC datetime to local datetime for display."""
+    return dt.replace(tzinfo=timezone.utc).astimezone(_LOCAL_TZ).replace(tzinfo=None)
 
 import typer
 
@@ -50,7 +58,7 @@ def lead_create(
     from career_mgr.storage import Lead
 
     db, leads, _ = _get_repos()
-    now = datetime.now()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     lead = leads.create(
         Lead(
             company=company,
@@ -164,14 +172,14 @@ def lead_show(
         typer.echo(f"Salary: {lead.salary_currency} {lo}–{hi}")
     if lead.notes:
         typer.echo(f"Notes: {lead.notes}")
-    typer.echo(f"Created: {lead.created_at:%Y-%m-%d %H:%M}")
-    typer.echo(f"Updated: {lead.updated_at:%Y-%m-%d %H:%M}")
+    typer.echo(f"Created: {_utc_to_local(lead.created_at):%Y-%m-%d %H:%M}")
+    typer.echo(f"Updated: {_utc_to_local(lead.updated_at):%Y-%m-%d %H:%M}")
 
     stages = process_repo.get_stages_for_lead(lead_id)
     if stages:
         typer.echo("\nProcess:")
         for s in stages:
-            sched = f"  @ {s.scheduled_at:%Y-%m-%d %H:%M}" if s.scheduled_at else ""
+            sched = f"  @ {_utc_to_local(s.scheduled_at):%Y-%m-%d %H:%M}" if s.scheduled_at else ""
             outcome = f"  -> {s.outcome}" if s.outcome else ""
             typer.echo(f"  {s.sequence}. {s.stage} ({s.status}){sched}{outcome}")
     db.close()
@@ -199,7 +207,7 @@ def process_add(
         db.close()
         raise typer.Exit(code=1)
 
-    now = datetime.now()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     seq = process_repo.next_sequence(lead_id)
     scheduled_at = datetime.fromisoformat(scheduled) if scheduled else None
 

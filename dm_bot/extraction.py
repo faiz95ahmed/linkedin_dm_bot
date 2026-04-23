@@ -11,12 +11,20 @@ extract structured data.
 import asyncio
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+# System local timezone for converting LinkedIn's local-time displays to UTC
+_LOCAL_TZ = datetime.now(timezone.utc).astimezone().tzinfo
+
+
+def _local_to_utc(dt: datetime) -> datetime:
+    """Convert a naive local-time datetime to a naive UTC datetime."""
+    return dt.replace(tzinfo=_LOCAL_TZ).astimezone(timezone.utc).replace(tzinfo=None)
 
 
 # =============================================================================
@@ -591,6 +599,7 @@ class InboxExtractor:
         """
         text = text.strip()
         now = datetime.now()
+        utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         # Try each pattern
         for pattern in self._TIMESTAMP_PATTERNS:
@@ -602,13 +611,13 @@ class InboxExtractor:
                 # Today
                 if "Today" in pattern.pattern:
 
-                    return datetime(now.year, now.month, now.day)
+                    return _local_to_utc(datetime(now.year, now.month, now.day))
 
                 # Yesterday
                 if "Yesterday" in pattern.pattern:
 
                     yesterday = now - timedelta(days=1)
-                    return datetime(yesterday.year, yesterday.month, yesterday.day)
+                    return _local_to_utc(datetime(yesterday.year, yesterday.month, yesterday.day))
 
                 # Full date: "Jan 15"
                 if pattern.pattern.startswith("^([A-Z]"):
@@ -625,31 +634,31 @@ class InboxExtractor:
                     result = datetime(year, month, day)
                     if result > now:
                         result = datetime(year - 1, month, day)
-                    return result
+                    return _local_to_utc(result)
 
                 # Hours ago: "2h"
                 elif "h$" in pattern.pattern:
                     hours = int(match.group(1))
 
-                    return now - timedelta(hours=hours)
+                    return utc_now - timedelta(hours=hours)
 
                 # Days ago: "3d"
                 elif "d$" in pattern.pattern:
                     days = int(match.group(1))
 
-                    return now - timedelta(days=days)
+                    return utc_now - timedelta(days=days)
 
                 # Minutes ago: "5m"
                 elif "m$" in pattern.pattern:
                     minutes = int(match.group(1))
 
-                    return now - timedelta(minutes=minutes)
+                    return utc_now - timedelta(minutes=minutes)
 
                 # Weeks ago: "1w"
                 elif "w$" in pattern.pattern:
                     weeks = int(match.group(1))
 
-                    return now - timedelta(weeks=weeks)
+                    return utc_now - timedelta(weeks=weeks)
 
                 # Time: "3:45 PM"
                 elif "AM|PM" in pattern.pattern:
@@ -660,7 +669,7 @@ class InboxExtractor:
                         hour += 12
                     elif ampm == "AM" and hour == 12:
                         hour = 0
-                    return datetime(now.year, now.month, now.day, hour, minute)
+                    return _local_to_utc(datetime(now.year, now.month, now.day, hour, minute))
 
             except (ValueError, KeyError) as e:
                 logger.debug(f"Failed to parse timestamp '{text}': {e}")
@@ -1396,7 +1405,7 @@ class MessageExtractor:
         timestamp = self._extract_timestamp(node)
         if timestamp is None:
             # Use current time as fallback
-            timestamp = datetime.now()
+            timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
 
         # Determine direction
         direction = self.determine_direction(node)
@@ -1607,6 +1616,7 @@ class MessageExtractor:
         """
         text = text.strip()
         now = datetime.now()
+        utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         for pattern in self._TIMESTAMP_PATTERNS:
             match = pattern.match(text)
@@ -1626,7 +1636,7 @@ class MessageExtractor:
                     result = datetime(now.year, now.month, now.day, hour, minute)
                     if result > now:
                         result -= timedelta(days=1)
-                    return result
+                    return _local_to_utc(result)
 
                 # 24h time: "12:35"
                 elif pattern.pattern == r"^(\d{1,2}):(\d{2})$":
@@ -1635,7 +1645,7 @@ class MessageExtractor:
                     result = datetime(now.year, now.month, now.day, hour, minute)
                     if result > now:
                         result -= timedelta(days=1)
-                    return result
+                    return _local_to_utc(result)
 
                 # Full date with time: "Jan 15, 3:45 PM"
                 elif "([A-Z][a-z]{2})\\s+(\\d{1,2}),?\\s+(\\d{1,2}):(\\d{2})\\s*(AM|PM)" in pattern.pattern:
@@ -1644,24 +1654,24 @@ class MessageExtractor:
                     hour = int(match.group(3))
                     minute = int(match.group(4))
                     ampm = match.group(5).upper()
-                    
+
                     month_map = {
                         "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4,
                         "May": 5, "Jun": 6, "Jul": 7, "Aug": 8,
                         "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
                     }
                     month = month_map.get(month_str, 1)
-                    
+
                     if ampm == "PM" and hour != 12:
                         hour += 12
                     elif ampm == "AM" and hour == 12:
                         hour = 0
-                    
+
                     year = now.year
                     result = datetime(year, month, day, hour, minute)
                     if result > now:
                         result = datetime(year - 1, month, day, hour, minute)
-                    return result
+                    return _local_to_utc(result)
 
                 # Full date: "Jan 15"
                 elif pattern.pattern == r"^([A-Z][a-z]{2})\s+(\d{1,2})$":
@@ -1677,32 +1687,32 @@ class MessageExtractor:
                     result = datetime(year, month, day)
                     if result > now:
                         result = datetime(year - 1, month, day)
-                    return result
+                    return _local_to_utc(result)
 
                 # ISO-like: "2024-01-15"
                 elif pattern.pattern == r"^(\d{4})-(\d{2})-(\d{2})$":
                     year = int(match.group(1))
                     month = int(match.group(2))
                     day = int(match.group(3))
-                    return datetime(year, month, day)
+                    return _local_to_utc(datetime(year, month, day))
 
                 # Hours ago: "2h"
                 elif "h$" in pattern.pattern:
                     hours = int(match.group(1))
 
-                    return now - timedelta(hours=hours)
+                    return utc_now - timedelta(hours=hours)
 
                 # Days ago: "3d"
                 elif "d$" in pattern.pattern:
                     days = int(match.group(1))
 
-                    return now - timedelta(days=days)
+                    return utc_now - timedelta(days=days)
 
                 # Minutes ago: "5m"
                 elif "m$" in pattern.pattern:
                     minutes = int(match.group(1))
 
-                    return now - timedelta(minutes=minutes)
+                    return utc_now - timedelta(minutes=minutes)
 
             except (ValueError, KeyError) as e:
                 logger.debug(f"Failed to parse timestamp '{text}': {e}")
@@ -2016,17 +2026,28 @@ class SyncEngine:
 
                     await self._rate_limiter.delay_for_conversation()
                     
+                    # Check if this conversation is already triaged with no new messages
+                    if preview.thread_url:
+                        existing = self._conversation_repo.get_by_thread_url(
+                            preview.thread_url
+                        )
+                        if (
+                            existing
+                            and existing.triaged_at is not None
+                            and existing.last_message_at is not None
+                            and existing.last_message_at <= existing.triaged_at
+                        ):
+                            logger.info(
+                                f"Conversation '{preview.connection_name}' already triaged; stopping early."
+                            )
+                            break
+
                     stored, skipped, extracted_count = await self.sync_single_conversation(
                         preview, progress_callback
                     )
                     result.conversations_processed += 1
                     result.messages_stored += stored
                     result.messages_skipped += skipped
-
-                    # TODO: re-enable early exit once inbox ordering is reliable
-                    # if stored == 0:
-                    #     logger.info("No new messages in this conversation; stopping early.")
-                    #     break
 
                 except Exception as e:
                     error_msg = f"Error syncing conversation '{preview.connection_name}': {e}"
@@ -2472,8 +2493,8 @@ class SyncEngine:
             linkedin_slug = self._generate_slug_from_name(connection_info.display_name)
 
         # Create/update Connection record - Requirement 5.1
-        now = datetime.now()
-        
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
         # Check if connection already exists to avoid INSERT OR REPLACE issues
         existing_connection = self._connection_repo.get_by_slug(linkedin_slug)
         if existing_connection:
@@ -2696,8 +2717,8 @@ class SyncEngine:
             {"new": messages_stored, "skipped": messages_skipped},
         )
 
-        # Update last_message_at from actual message timestamps
-        if extracted_messages:
+        # Update last_message_at from actual message timestamps (only if new messages were stored)
+        if messages_stored > 0 and extracted_messages:
             ts_values = [msg.timestamp for msg in extracted_messages if msg.timestamp]
             latest_ts = max(ts_values) if ts_values else None
             self._conversation_repo.update_last_message_at(
@@ -3128,11 +3149,12 @@ class SyncEngine:
             )
             if iso_dt:
                 try:
-                    return datetime(
+                    # ISO timestamps from LinkedIn's <time datetime> are local time
+                    return _local_to_utc(datetime(
                         int(iso_dt.group(1)), int(iso_dt.group(2)),
                         int(iso_dt.group(3)), int(iso_dt.group(4)),
                         int(iso_dt.group(5)),
-                    )
+                    ))
                 except ValueError:
                     pass
 
@@ -3141,10 +3163,10 @@ class SyncEngine:
             iso_d = _re.match(r"^(\d{4})-(\d{2})-(\d{2})$", candidate)
             if iso_d:
                 try:
-                    return datetime(
+                    return _local_to_utc(datetime(
                         int(iso_d.group(1)), int(iso_d.group(2)),
                         int(iso_d.group(3)),
-                    )
+                    ))
                 except ValueError:
                     pass
 
@@ -3207,11 +3229,11 @@ class SyncEngine:
         if hour is None:
             # Time unknown but date known → use midnight
             if year and month and day:
-                return datetime(year, month, day)
+                return _local_to_utc(datetime(year, month, day))
             return None
 
         if year and month and day:
-            return datetime(year, month, day, hour, minute or 0)
+            return _local_to_utc(datetime(year, month, day, hour, minute or 0))
 
         # No date from in-thread separator: use fallback_date if available, else today.
         # Adjust back one day if the result would be in the future.
@@ -3219,7 +3241,7 @@ class SyncEngine:
         result = datetime(base.year, base.month, base.day, hour, minute or 0)
         if result > now:
             result -= timedelta(days=1)
-        return result
+        return _local_to_utc(result)
 
     async def _extract_messages_from_dom(
         self, connection_name: str

@@ -20,25 +20,32 @@ Career files live at `~/CAREER/` (outside this repo, not git-tracked). Always ch
 ```bash
 dm-bot sync [--since DATE] [--limit N]          # sync conversations from LinkedIn
 dm-bot sync-conversation URL                     # sync a single conversation by URL
-dm-bot inbox [--since N] [--limit N]             # list recent conversations
+dm-bot inbox [--since N] [--limit N] [--untriaged] # list recent conversations
 dm-bot conversation <id>                         # print full thread
 dm-bot find <name>                               # search by contact name
 dm-bot get-url <id>                              # get thread URL
+dm-bot triage <id> [id...]                       # mark conversations as triaged
+dm-bot triage --all                              # triage all untriaged conversations
 ```
+
+**Cron usage:** `uv run dm-bot sync --limit 20` — syncs incrementally using `last_synced_at` per conversation. Safe to run repeatedly; only conversations with new messages are re-synced.
 
 **Workflow:**
 1. `uv run dm-bot sync --limit N` — pull latest conversations
-2. `uv run dm-bot inbox --since N` — review what's new
+2. `uv run dm-bot inbox --untriaged` — review conversations needing attention
 3. `uv run dm-bot conversation <id>` — read a specific thread
+4. `uv run dm-bot triage <id> [id...]` — mark handled conversations as triaged
 
 ## Email Sync Workflow
 
 **CLI reference:**
 
 ```bash
-email-sync last-sync                                    # last email sync timestamp
-email-sync fetch -s ISO -o DIR -l SET [-b EXTRA...]     # fetch + filter + write JSON to /tmp/email-reader/DIR/
-email-sync collect -f DIR THREAD_ID [THREAD_ID...]      # collect threads + download attachments
+email-sync last-sync                                    # last completed email sync timestamp
+email-sync fetch -l SET [-s ISO] [-o DIR] [-b EXTRA...] # fetch + filter + append JSON batches (ongoing sync)
+email-sync pending                                       # show ongoing sync status (folder, thread count)
+email-sync collect -f DIR THREAD_ID [THREAD_ID...]      # collect threads + download attachments + complete sync
+email-sync collect -f DIR --none                         # complete sync with no relevant threads
 email-sync download-attachments MSG_ID [-o DIR]          # download attachments from a single message
 
 email-sync blocklist create|delete|list
@@ -48,18 +55,21 @@ email-sync blocklist-set create|delete|list
 email-sync blocklist-set show|add|remove NAME [BLOCKLIST...]
 ```
 
+**Cron usage:** `uv run email-sync fetch -l recruiter_emails` — no `--since` or `--output` needed. Uses last completed sync time, auto-names the output folder, and appends to the ongoing sync on subsequent runs.
+
 **End-to-end email ingestion workflow:**
 
-1. Check last sync: `uv run email-sync last-sync`
-2. List blocklist sets: `uv run email-sync blocklist-set list`
-3. Inspect a candidate set: `uv run email-sync blocklist-set show SET_NAME`
-4. Decision: use existing set, modify it (add/remove blocklists), or create new
-5. Optionally inspect blocklist contents: `uv run email-sync blocklist show BLOCKLIST_NAME`
-6. Fetch: `uv run email-sync fetch -s SINCE -o OUTPUT_DIR -l SET_NAME`
-7. Filter: invoke `email-relevance-filter` agent on each `/tmp/email-reader/OUTPUT_DIR/{N}.json`
-8. Blocklist hygiene: add irrelevant addresses to existing blocklists or create new ones (and add to set)
-9. Collect: `uv run email-sync collect -f OUTPUT_DIR THREAD_ID [...]`
-10. Result: `/tmp/email-reader/OUTPUT_DIR/collected.json` — relevant threads with attachment `localPath` references pointing to `/tmp/email-reader/OUTPUT_DIR/attachments/`
+1. Check pending sync: `uv run email-sync pending` — if ongoing, skip to step 7 using the existing folder
+2. Check last sync: `uv run email-sync last-sync`
+3. List blocklist sets: `uv run email-sync blocklist-set list`
+4. Inspect a candidate set: `uv run email-sync blocklist-set show SET_NAME`
+5. Decision: use existing set, modify it (add/remove blocklists), or create new
+6. Optionally inspect blocklist contents: `uv run email-sync blocklist show BLOCKLIST_NAME`
+7. Fetch: `uv run email-sync fetch -l SET_NAME` (appends to ongoing sync, or creates one)
+8. Filter: invoke `email-relevance-filter` agent on each `/tmp/email-reader/OUTPUT_DIR/{N}.json`
+9. Blocklist hygiene: add irrelevant addresses to existing blocklists or create new ones (and add to set)
+10. Collect: `uv run email-sync collect -f OUTPUT_DIR THREAD_ID [...]` (marks sync as completed), or `--none` if no relevant threads
+11. Result: `/tmp/email-reader/OUTPUT_DIR/collected.json` — relevant threads with attachment `localPath` references pointing to `/tmp/email-reader/OUTPUT_DIR/attachments/`
 
 ## Calendar
 
@@ -97,16 +107,21 @@ Valid process statuses: `upcoming`, `completed`, `cancelled`, `rescheduled`, `no
 
 ## Sync & Triage
 
-If the user asks only to "sync" (without "triage"), confirm whether they mean just syncing or the full sync & triage pipeline.
+If the user asks only to "sync" (without "triage"), confirm whether they mean just syncing (step 1 below) or the full sync & triage pipeline.
+
+Just "triage" on it's own likely means to just triage the untriaged linkedin dms and collect the emails (which may have been synced as part of a cronjob) and triage them also (steps 2 onwards below).
+
+We have a cronjob set up to run step 1 every 2 hours between 9am and 9pm.
 
 When the user asks to "sync and triage" (or similar), run the full pipeline:
 
-1. **Sync** (parallel): `dm-bot sync --limit N` + email fetch/filter/collect workflow
-2. **Ingest**: read new conversations + collected emails, cross-reference against `career_profile.md` and active leads (detect multi-recruiter pitches)
-3. **Research** (parallel): invoke `opportunity-researcher` agent on promising new leads
-4. **Draft**: prepare a consolidated summary table of all new/updated leads with fit assessment and recommended action, plus draft replies
-5. **Discuss**: present findings to user, clarify unknowns, get decisions on each lead
-6. **Act**: send approved replies, create/update leads in career manager, save any JDs to `~/CAREER/jds/`
+1. **Sync** (parallel): `dm-bot sync --limit N` + email fetch
+2. **Filter**: Email filter & collect workflow
+3. **Ingest**: read new conversations + collected emails, cross-reference against `career_profile.md` and active leads (detect multi-recruiter pitches)
+4. **Research** (parallel): invoke `opportunity-researcher` agent on promising new leads
+5. **Draft**: prepare a consolidated summary table of all new/updated leads with fit assessment and recommended action, plus draft replies
+6. **Discuss**: present findings to user, clarify unknowns, get decisions on each lead
+7. **Act**: send approved replies, create/update leads in career manager, save any JDs to `~/CAREER/jds/`
 
 See: LinkedIn Sync, Email Sync Workflow, Ingestion & Decision-Making sections for details on each step.
 
@@ -139,7 +154,7 @@ Never auto-send any recruiter-facing LinkedIn DM or email. Always present a draf
 **Send commands:**
 
 ```bash
-dm-bot send-message <id> "..." --attachment <file>       # LinkedIn DM
+dm-bot send-message <id> "..." --attachment <file>       # LinkedIn DM (auto-triages after send)
 gws gmail +send --to addr --from "Faiz Ahmed <faiz95ahmed@gmail.com>" --subject "..." --body "..."  # email
 gws gmail +reply --message-id MSG_ID --from "Faiz Ahmed <faiz95ahmed@gmail.com>" --body "..."       # email reply
 ```

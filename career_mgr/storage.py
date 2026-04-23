@@ -2,7 +2,7 @@
 
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -252,7 +252,7 @@ class LeadRepository:
         if lead is None:
             raise LeadNotFoundError(f"Lead {lead_id} not found")
 
-        fields["updated_at"] = datetime.now()
+        fields["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
         set_clauses = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [lead_id]
 
@@ -381,7 +381,7 @@ class ProcessRepository:
         if proc is None:
             raise ProcessNotFoundError(f"Process {process_id} not found")
 
-        fields["updated_at"] = datetime.now()
+        fields["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
         set_clauses = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [process_id]
 

@@ -84,6 +84,7 @@ class Conversation(BaseModel):
     thread_url: str | None = None
     last_message_at: datetime | None = None
     last_synced_at: datetime | None = None
+    triaged_at: datetime | None = None
 
 
 class Message(BaseModel):
@@ -299,7 +300,9 @@ class DatabaseManager:
         CREATE TABLE IF NOT EXISTS sync (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sync_type TEXT NOT NULL CHECK (sync_type IN ('email', 'linkedin')),
-            sync_time DATETIME NOT NULL
+            sync_time DATETIME NOT NULL,
+            completed_at DATETIME,
+            output_dir TEXT
         );
     """
 
@@ -368,6 +371,28 @@ class DatabaseManager:
         conn = self.connect()
         try:
             conn.executescript(self._SCHEMA_SQL)
+            conn.commit()
+            # Migrations — idempotent ALTER TABLE additions
+            for col, typedef in [
+                ("completed_at", "DATETIME"),
+                ("output_dir", "TEXT"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE sync ADD COLUMN {col} {typedef}")
+                    conn.commit()
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+            # Add triaged_at to conversation table
+            try:
+                conn.execute("ALTER TABLE conversation ADD COLUMN triaged_at DATETIME")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            # Backfill legacy rows: treat them as completed
+            conn.execute(
+                "UPDATE sync SET completed_at = sync_time "
+                "WHERE completed_at IS NULL AND output_dir IS NULL"
+            )
             conn.commit()
             logger.info("Database schema initialized successfully")
         except sqlite3.Error as e:
@@ -600,9 +625,14 @@ class ConversationRepository:
         try:
             cursor = conn.execute(
                 """
-                INSERT OR REPLACE INTO conversation 
-                    (connection_id, thread_url, last_message_at, last_synced_at, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO conversation
+                    (connection_id, thread_url, last_message_at, last_synced_at, created_at, triaged_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(connection_id) DO UPDATE SET
+                    thread_url = excluded.thread_url,
+                    last_message_at = excluded.last_message_at,
+                    last_synced_at = excluded.last_synced_at,
+                    triaged_at = COALESCE(excluded.triaged_at, conversation.triaged_at)
                 """,
                 (
                     conversation.connection_id,
@@ -610,18 +640,25 @@ class ConversationRepository:
                     conversation.last_message_at,
                     conversation.last_synced_at,
                     conversation.created_at,
+                    conversation.triaged_at,
                 ),
             )
             conn.commit()
 
-            # Return conversation with populated id
+            # Fetch the actual row to get the correct id and triaged_at
+            row = conn.execute(
+                "SELECT id, triaged_at FROM conversation WHERE connection_id = ?",
+                (conversation.connection_id,),
+            ).fetchone()
+
             return Conversation(
-                id=cursor.lastrowid,
+                id=row[0],
                 connection_id=conversation.connection_id,
                 thread_url=conversation.thread_url,
                 last_message_at=conversation.last_message_at,
                 last_synced_at=conversation.last_synced_at,
                 created_at=conversation.created_at,
+                triaged_at=row[1],
             )
         except sqlite3.Error as e:
             logger.error(f"Failed to upsert conversation: {e}")
@@ -643,8 +680,8 @@ class ConversationRepository:
         try:
             cursor = conn.execute(
                 """
-                SELECT id, connection_id, thread_url, last_message_at, 
-                       last_synced_at, created_at
+                SELECT id, connection_id, thread_url, last_message_at,
+                       last_synced_at, created_at, triaged_at
                 FROM conversation
                 WHERE connection_id = ?
                 """,
@@ -662,6 +699,7 @@ class ConversationRepository:
                 last_message_at=row[3],
                 last_synced_at=row[4],
                 created_at=row[5],
+                triaged_at=row[6],
             )
         except sqlite3.Error as e:
             logger.error(f"Failed to get conversation by connection_id: {e}")
@@ -676,7 +714,7 @@ class ConversationRepository:
             cursor = conn.execute(
                 """
                 SELECT id, connection_id, thread_url, last_message_at,
-                       last_synced_at, created_at
+                       last_synced_at, created_at, triaged_at
                 FROM conversation WHERE id = ?
                 """,
                 (conversation_id,),
@@ -687,6 +725,7 @@ class ConversationRepository:
             return Conversation(
                 id=row[0], connection_id=row[1], thread_url=row[2],
                 last_message_at=row[3], last_synced_at=row[4], created_at=row[5],
+                triaged_at=row[6],
             )
         except sqlite3.Error as e:
             raise StorageError(f"Failed to get conversation by id: {e}") from e
@@ -709,7 +748,7 @@ class ConversationRepository:
             cursor = conn.execute(
                 """
                 SELECT id, connection_id, thread_url, last_message_at,
-                       last_synced_at, created_at
+                       last_synced_at, created_at, triaged_at
                 FROM conversation
                 WHERE thread_url LIKE ?
                 """,
@@ -725,6 +764,7 @@ class ConversationRepository:
                 last_message_at=row[3],
                 last_synced_at=row[4],
                 created_at=row[5],
+                triaged_at=row[6],
             )
         except sqlite3.Error as e:
             logger.error(f"Failed to get conversation by thread_url: {e}")
@@ -768,8 +808,8 @@ class ConversationRepository:
             if since is not None:
                 cursor = conn.execute(
                     """
-                    SELECT id, connection_id, thread_url, last_message_at, 
-                           last_synced_at, created_at
+                    SELECT id, connection_id, thread_url, last_message_at,
+                           last_synced_at, created_at, triaged_at
                     FROM conversation
                     WHERE last_message_at IS NOT NULL
                       AND (last_synced_at IS NULL OR last_message_at > last_synced_at)
@@ -782,8 +822,8 @@ class ConversationRepository:
             else:
                 cursor = conn.execute(
                     """
-                    SELECT id, connection_id, thread_url, last_message_at, 
-                           last_synced_at, created_at
+                    SELECT id, connection_id, thread_url, last_message_at,
+                           last_synced_at, created_at, triaged_at
                     FROM conversation
                     WHERE last_message_at IS NOT NULL
                       AND (last_synced_at IS NULL OR last_message_at > last_synced_at)
@@ -803,6 +843,7 @@ class ConversationRepository:
                     last_message_at=row[3],
                     last_synced_at=row[4],
                     created_at=row[5],
+                    triaged_at=row[6],
                 )
                 for row in rows
             ]
@@ -868,6 +909,54 @@ class ConversationRepository:
             conn.commit()
         except sqlite3.Error as e:
             raise StorageError(f"Failed to update last_message_at: {e}") from e
+
+    def triage(self, conversation_id: int) -> None:
+        """Mark a conversation as triaged."""
+        conn = self._db.connect()
+        try:
+            cursor = conn.execute(
+                "UPDATE conversation SET triaged_at = datetime('now') WHERE id = ?",
+                (conversation_id,),
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                raise ConversationNotFoundError(
+                    f"Conversation with id {conversation_id} not found"
+                )
+        except ConversationNotFoundError:
+            raise
+        except sqlite3.Error as e:
+            raise StorageError(f"Failed to triage conversation: {e}") from e
+
+    def triage_many(self, conversation_ids: list[int]) -> int:
+        """Bulk-triage conversations. Returns count updated."""
+        conn = self._db.connect()
+        try:
+            placeholders = ",".join("?" for _ in conversation_ids)
+            cursor = conn.execute(
+                f"UPDATE conversation SET triaged_at = datetime('now') WHERE id IN ({placeholders})",
+                conversation_ids,
+            )
+            conn.commit()
+            return cursor.rowcount
+        except sqlite3.Error as e:
+            raise StorageError(f"Failed to triage conversations: {e}") from e
+
+    def triage_all_untriaged(self) -> int:
+        """Triage all conversations that are untriaged or have new messages. Returns count."""
+        conn = self._db.connect()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE conversation SET triaged_at = datetime('now')
+                WHERE triaged_at IS NULL
+                   OR replace(last_message_at, 'T', ' ') > replace(triaged_at, 'T', ' ')
+                """,
+            )
+            conn.commit()
+            return cursor.rowcount
+        except sqlite3.Error as e:
+            raise StorageError(f"Failed to triage all conversations: {e}") from e
 
 
 # =============================================================================
@@ -1168,7 +1257,7 @@ class SyncRepository:
         self._db = db
 
     def record(self, sync_type: str) -> int:
-        """Record a sync operation.
+        """Record a completed sync operation (legacy helper).
 
         Args:
             sync_type: Either 'email' or 'linkedin'
@@ -1179,7 +1268,8 @@ class SyncRepository:
         conn = self._db.connect()
         try:
             cursor = conn.execute(
-                "INSERT INTO sync (sync_type, sync_time) VALUES (?, datetime('now'))",
+                "INSERT INTO sync (sync_type, sync_time, completed_at) "
+                "VALUES (?, datetime('now'), datetime('now'))",
                 (sync_type,),
             )
             conn.commit()
@@ -1188,19 +1278,83 @@ class SyncRepository:
             logger.error(f"Failed to record sync: {e}")
             raise StorageError(f"Failed to record sync: {e}") from e
 
+    def start(self, sync_type: str, output_dir: str) -> int:
+        """Create an ongoing sync row. Errors if one already exists.
+
+        Args:
+            sync_type: Either 'email' or 'linkedin'
+            output_dir: The output folder name for this sync
+
+        Returns:
+            The id of the new sync record
+        """
+        conn = self._db.connect()
+        existing = self.get_ongoing(sync_type)
+        if existing is not None:
+            raise StorageError(
+                f"An ongoing {sync_type} sync already exists "
+                f"(id={existing[0]}, output_dir={existing[2]})"
+            )
+        try:
+            cursor = conn.execute(
+                "INSERT INTO sync (sync_type, sync_time, output_dir) "
+                "VALUES (?, datetime('now'), ?)",
+                (sync_type, output_dir),
+            )
+            conn.commit()
+            return cursor.lastrowid  # type: ignore[return-value]
+        except sqlite3.Error as e:
+            logger.error(f"Failed to start sync: {e}")
+            raise StorageError(f"Failed to start sync: {e}") from e
+
+    def get_ongoing(self, sync_type: str) -> tuple[int, str, str] | None:
+        """Get the ongoing sync for a given type.
+
+        Returns:
+            (id, sync_time, output_dir) or None if no ongoing sync
+        """
+        conn = self._db.connect()
+        try:
+            cursor = conn.execute(
+                "SELECT id, sync_time, output_dir FROM sync "
+                "WHERE sync_type = ? AND completed_at IS NULL "
+                "ORDER BY sync_time DESC LIMIT 1",
+                (sync_type,),
+            )
+            row = cursor.fetchone()
+            return (row[0], row[1], row[2]) if row else None
+        except sqlite3.Error as e:
+            logger.error(f"Failed to get ongoing sync: {e}")
+            raise StorageError(f"Failed to get ongoing sync: {e}") from e
+
+    def complete(self, sync_id: int) -> None:
+        """Mark a sync as completed."""
+        conn = self._db.connect()
+        try:
+            conn.execute(
+                "UPDATE sync SET completed_at = datetime('now') WHERE id = ?",
+                (sync_id,),
+            )
+            conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Failed to complete sync: {e}")
+            raise StorageError(f"Failed to complete sync: {e}") from e
+
     def get_last(self, sync_type: str) -> str | None:
-        """Get the timestamp of the most recent sync of a given type.
+        """Get the timestamp of the most recent *completed* sync of a given type.
 
         Args:
             sync_type: Either 'email' or 'linkedin'
 
         Returns:
-            ISO datetime string of the last sync, or None if never synced
+            ISO datetime string of the last completed sync, or None if never synced
         """
         conn = self._db.connect()
         try:
             cursor = conn.execute(
-                "SELECT sync_time FROM sync WHERE sync_type = ? ORDER BY sync_time DESC LIMIT 1",
+                "SELECT sync_time FROM sync "
+                "WHERE sync_type = ? AND completed_at IS NOT NULL "
+                "ORDER BY sync_time DESC LIMIT 1",
                 (sync_type,),
             )
             row = cursor.fetchone()
