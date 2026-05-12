@@ -9,17 +9,17 @@ Requirements: 1.1, 2.5, 7.1, 7.2
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import typer
+from dotenv import load_dotenv
 
 from dm_bot.browser import BrowserManager, run_with_headless_fallback
 from dm_bot.config import (
     BlockedFlag,
-    LI_PASS,
-    LI_USER,
     PROFILE_PATH,
     RateLimiter,
     setup_logging,
@@ -150,19 +150,27 @@ class ProgressReporter:
                 typer.echo(f"  ... and {len(errors) - 5} more")
 
 
-def validate_credentials() -> tuple[str, str]:
+def validate_credentials(env_file: Optional[Path] = None) -> tuple[str, str]:
     """
     Validate and load credentials from environment variables.
-    
-    Returns:
-        Tuple of (username, password)
-        
-    Raises:
-        typer.Exit: If credentials are not set
-        
+
+    If env_file is provided, load it via python-dotenv before reading
+    LI_USER / LI_PASS. Otherwise fall back to whatever is already in the
+    process environment (which dm_bot.config has already populated from
+    a cwd-relative .env at import time).
+
     Requirement 1.1: Load credentials from environment variables LI_USER and LI_PASS
     """
-    if not LI_USER or not LI_PASS:
+    if env_file is not None:
+        if not env_file.exists():
+            typer.echo(f"Error: env file not found: {env_file}", err=True)
+            raise typer.Exit(code=1)
+        load_dotenv(env_file, override=True)
+
+    user = os.getenv("LI_USER")
+    password = os.getenv("LI_PASS")
+
+    if not user or not password:
         typer.echo(
             "Error: Credentials not found in environment variables.",
             err=True,
@@ -172,8 +180,8 @@ def validate_credentials() -> tuple[str, str]:
             err=True,
         )
         raise typer.Exit(code=1)
-    
-    return LI_USER, LI_PASS
+
+    return user, password
 
 
 @app.command()
@@ -496,6 +504,12 @@ def sync(
         "-p",
         help="Path to browser profile directory",
     ),
+    env_file: Optional[Path] = typer.Option(
+        None,
+        "--env-file",
+        "-e",
+        help="Path to .env file to load before reading LI_USER / LI_PASS",
+    ),
 ) -> None:
     """
     Sync conversations and messages from LinkedIn to local database.
@@ -514,7 +528,7 @@ def sync(
     logger.info("Starting sync command")
 
     # Validate credentials
-    username, password = validate_credentials()
+    username, password = validate_credentials(env_file=env_file)
 
     # Use default profile path if not provided
     if profile_path is None:

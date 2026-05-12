@@ -18,7 +18,7 @@ Career files live at `~/CAREER/` (outside this repo, not git-tracked). Always ch
 **CLI reference:**
 
 ```bash
-dm-bot sync [--since DATE] [--limit N]          # sync conversations from LinkedIn
+dm-bot sync [--since DATE] [--limit N] [--env-file PATH]  # sync conversations from LinkedIn
 dm-bot sync-conversation URL                     # sync a single conversation by URL
 dm-bot inbox [--since N] [--limit N] [--untriaged] # list recent conversations
 dm-bot conversation <id>                         # print full thread
@@ -27,6 +27,8 @@ dm-bot get-url <id>                              # get thread URL
 dm-bot triage <id> [id...]                       # mark conversations as triaged
 dm-bot triage --all                              # triage all untriaged conversations
 ```
+
+**`--env-file` / `-e`:** explicit path to a `.env` file. Use this from Claude Code so credentials load reliably without depending on the shell's cwd: `uv run dm-bot sync --limit 20 --env-file /Users/faiz/linkedin_dm_bot/.env`. The cron entry sources `.env` via `set -a && . .env` from within the project dir; `--env-file` is the equivalent for interactive/manual runs.
 
 **Cron usage:** `uv run dm-bot sync --limit 20` — syncs incrementally using `last_synced_at` per conversation. Safe to run repeatedly; only conversations with new messages are re-synced.
 
@@ -112,6 +114,8 @@ If the user asks only to "sync" (without "triage"), confirm whether they mean ju
 Just "triage" on it's own likely means to just triage the untriaged linkedin dms and collect the emails (which may have been synced as part of a cronjob) and triage them also (steps 2 onwards below).
 
 We have a cronjob set up to run step 1 every 2 hours between 9am and 9pm.
+
+When the user asks to sync, they are asking for a manual sync, and so, you need to check for actively running sync processes first (email and linkedin). If there are any running, then confirm with the user whether to kill them or not, or, wait until they're finished.
 
 When the user asks to "sync and triage" (or similar), run the full pipeline:
 
