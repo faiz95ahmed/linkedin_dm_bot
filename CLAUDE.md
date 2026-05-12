@@ -18,17 +18,18 @@ Career files live at `~/CAREER/` (outside this repo, not git-tracked). Always ch
 **CLI reference:**
 
 ```bash
-dm-bot sync [--since DATE] [--limit N] [--env-file PATH]  # sync conversations from LinkedIn
-dm-bot sync-conversation URL                     # sync a single conversation by URL
-dm-bot inbox [--since N] [--limit N] [--untriaged] # list recent conversations
-dm-bot conversation <id>                         # print full thread
-dm-bot find <name>                               # search by contact name
-dm-bot get-url <id>                              # get thread URL
-dm-bot triage <id> [id...]                       # mark conversations as triaged
-dm-bot triage --all                              # triage all untriaged conversations
+dm-bot [--env-file PATH] sync [--since DATE] [--limit N]   # sync conversations from LinkedIn
+dm-bot [--env-file PATH] sync-conversation URL              # sync a single conversation by URL
+dm-bot inbox [--since N] [--limit N] [--untriaged]         # list recent conversations
+dm-bot conversation <id>                                    # print full thread
+dm-bot find <name>                                          # search by contact name
+dm-bot get-url <id>                                         # get thread URL
+dm-bot triage <id> [id...]                                  # mark conversations as triaged
+dm-bot triage --all                                         # triage all untriaged conversations
+dm-bot [--env-file PATH] send-message <id> "..."            # send DM to a conversation
 ```
 
-**`--env-file` / `-e`:** explicit path to a `.env` file. Use this from Claude Code so credentials load reliably without depending on the shell's cwd: `uv run dm-bot sync --limit 20 --env-file /Users/faiz/linkedin_dm_bot/.env`. The cron entry sources `.env` via `set -a && . .env` from within the project dir; `--env-file` is the equivalent for interactive/manual runs.
+**`--env-file` / `-e`:** top-level flag on `dm-bot` (placed before the subcommand). Loads the given `.env` so `LI_USER` / `LI_PASS` are available regardless of cwd. Use this from Claude Code: `uv run dm-bot --env-file /Users/faiz/linkedin_dm_bot/.env sync --limit 20`. The cron entry sources `.env` via `set -a && . .env` from within the project dir; `--env-file` is the equivalent for interactive/manual runs.
 
 **Cron usage:** `uv run dm-bot sync --limit 20` — syncs incrementally using `last_synced_at` per conversation. Safe to run repeatedly; only conversations with new messages are re-synced.
 
