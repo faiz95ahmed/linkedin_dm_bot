@@ -1938,6 +1938,7 @@ class SyncEngine:
         since: datetime | None = None,
         limit: int = 50,
         progress_callback: Any = None,  # Callable[[str, dict[str, Any]], None] | None
+        skip_triaged: bool = False,
     ) -> SyncResult:
         """Sync conversations from LinkedIn to database.
 
@@ -2037,6 +2038,11 @@ class SyncEngine:
                             and existing.last_message_at is not None
                             and existing.last_message_at <= existing.triaged_at
                         ):
+                            if skip_triaged:
+                                logger.info(
+                                    f"Conversation '{preview.connection_name}' already triaged; skipping."
+                                )
+                                continue
                             logger.info(
                                 f"Conversation '{preview.connection_name}' already triaged; stopping early."
                             )
@@ -3227,9 +3233,14 @@ class SyncEngine:
                         year, month, day = ref.year, ref.month, ref.day
 
         if hour is None:
-            # Time unknown but date known → use midnight
+            # Time unknown but date known → return a naive local-time midnight.
+            # Do NOT apply UTC conversion here: callers use the date-only result
+            # as a `fallback_date` carrier for subsequent time parsing on the same
+            # message, and BST→UTC of midnight shifts the date back a day (e.g.
+            # `May 13 00:00 BST → May 12 23:00 UTC`), causing every message
+            # timestamp built from this carrier to be off by 1 day.
             if year and month and day:
-                return _local_to_utc(datetime(year, month, day))
+                return datetime(year, month, day)
             return None
 
         if year and month and day:

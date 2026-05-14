@@ -18,7 +18,7 @@ Career files live at `~/CAREER/` (outside this repo, not git-tracked). Always ch
 **CLI reference:**
 
 ```bash
-dm-bot [--env-file PATH] sync [--since DATE] [--limit N]   # sync conversations from LinkedIn
+dm-bot [--env-file PATH] sync [--since DATE] [--limit N] [--skip-triaged]  # sync conversations from LinkedIn
 dm-bot [--env-file PATH] sync-conversation URL              # sync a single conversation by URL
 dm-bot inbox [--since N] [--limit N] [--untriaged]         # list recent conversations
 dm-bot conversation <id>                                    # print full thread
@@ -30,6 +30,8 @@ dm-bot [--env-file PATH] send-message <id> "..."            # send DM to a conve
 ```
 
 **`--env-file` / `-e`:** top-level flag on `dm-bot` (placed before the subcommand). Loads the given `.env` so `LI_USER` / `LI_PASS` are available regardless of cwd. Use this from Claude Code: `uv run dm-bot --env-file /Users/faiz/linkedin_dm_bot/.env sync --limit 20`. The cron entry sources `.env` via `set -a && . .env` from within the project dir; `--env-file` is the equivalent for interactive/manual runs.
+
+**`--skip-triaged` / `-F`:** on `sync`. By default, sync stops at the first already-triaged conversation with no new activity — efficient for routine cron runs. With `--skip-triaged`, sync walks the full `--limit` window and skips triaged conversations individually. Useful when the inbox order has changed (e.g. an old conversation got bumped up by a new message lower in the list) or when you want to backfill missed conversations.
 
 **Cron usage:** `uv run dm-bot sync --limit 20` — syncs incrementally using `last_synced_at` per conversation. Safe to run repeatedly; only conversations with new messages are re-synced.
 
