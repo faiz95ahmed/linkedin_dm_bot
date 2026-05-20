@@ -1936,40 +1936,23 @@ class SyncEngine:
     async def sync_conversations(
         self,
         since: datetime | None = None,
-        limit: int = 50,
+        limit: int | None = None,
         progress_callback: Any = None,  # Callable[[str, dict[str, Any]], None] | None
-        skip_triaged: bool = False,
     ) -> SyncResult:
         """Sync conversations from LinkedIn to database.
 
-        Extracts conversation previews from the inbox, then syncs each
-        conversation's messages to the database. Supports incremental
-        sync based on timestamps and limiting the number of conversations.
+        Default (limit=None) uses the latest-inbound-message timestamp as the
+        stop anchor: walks the inbox (scrolling as needed) until the bottom-most
+        preview's timestamp is at or below the anchor.
+
+        With limit=N, walks exactly N conversations from the top of the inbox
+        regardless of the anchor — for backfills or forced re-syncs.
 
         Args:
-            since: Optional datetime to filter conversations with
-                   activity after this date (Requirement 7.1)
-            limit: Maximum number of conversations to process (Requirement 7.2)
+            since: Optional cutoff — drop previews with timestamp < since
+            limit: If set, sync exactly this many top-of-inbox conversations.
+                   If None, use anchor (latest inbound message timestamp).
             progress_callback: Optional callback for progress reporting.
-                             Called with (event_type: str, data: dict[str, Any])
-                             Event types: "conversation_start", "messages_extracted",
-                             "messages_stored" (Requirement 3.1, 3.2, 3.3)
-
-        Returns:
-            SyncResult with counts of processed items and any errors
-
-        Requirements:
-            - 5.1: Create or update Connection record
-            - 5.2: Create or update Conversation record
-            - 5.3: Store messages with deduplication
-            - 5.4: Update last_synced_at timestamp
-            - 7.1: Filter by --since date parameter
-            - 7.2: Respect --limit parameter
-            - 7.3: Skip conversations where last_message_at <= last_synced_at
-            - 7.4: Process in order of most recent activity first
-            - 3.1: Report conversation start with name and progress
-            - 3.2: Report messages extracted count
-            - 3.3: Report messages stored (new vs skipped)
         """
         result = SyncResult(
             conversations_processed=0,
@@ -1979,34 +1962,49 @@ class SyncEngine:
         )
 
         try:
-            # Get accessibility snapshot of inbox
-            snapshot = await self._get_accessibility_snapshot()
-            if not snapshot:
-                logger.warning("Empty accessibility snapshot from inbox")
-                return result
+            # Compute anchor from DB. Only used when limit is None.
+            anchor = self._message_repo.get_latest_inbound_timestamp()
+            if limit is None:
+                if anchor is not None:
+                    logger.info(f"Sync anchor: {anchor.isoformat()} (latest inbound message)")
+                else:
+                    logger.info("Sync anchor: none (no inbound messages in DB — first sync)")
+            else:
+                logger.info(f"Sync limit: {limit} (forced; anchor ignored)")
 
-            # Extract conversation previews
-            previews = self._inbox_extractor.extract_previews(snapshot)
+            # Collect previews, scrolling the inbox as needed.
+            previews = await self._collect_inbox_previews(limit=limit, anchor=anchor)
             if not previews:
                 logger.info("No conversations found in inbox")
                 return result
 
-            logger.info(f"Found {len(previews)} conversations in inbox")
+            logger.info(f"Collected {len(previews)} conversations from inbox")
 
-            # Enrich previews with thread URLs from DOM (not in accessibility tree)
-            await self._enrich_with_thread_urls(previews)
+            # Apply --since cutoff (additional filter, independent of anchor/limit)
+            if since is not None:
+                before_since = len(previews)
+                previews = [
+                    p for p in previews
+                    if p.timestamp is None or p.timestamp >= since
+                ]
+                logger.info(f"After --since filter: {len(previews)} (dropped {before_since - len(previews)})")
 
-            # Filter and sort previews for incremental sync
-            previews = self._filter_previews_for_sync(previews, since)
-
-            # Sort by timestamp descending (most recent first) - Requirement 7.4
+            # Sort by timestamp descending (most recent first)
             previews.sort(
                 key=lambda p: p.timestamp or datetime.min,
                 reverse=True,
             )
 
-            # Apply limit - Requirement 7.2
-            previews = previews[:limit]
+            if limit is not None:
+                # --limit N: take exactly N from the top regardless of anchor.
+                previews = previews[:limit]
+            elif anchor is not None:
+                # Anchor mode: drop anything at or below the anchor — nothing
+                # newer than what we already have.
+                previews = [
+                    p for p in previews
+                    if p.timestamp is None or p.timestamp > anchor
+                ]
 
             logger.info(f"Processing {len(previews)} conversations after filtering")
 
@@ -2014,7 +2012,6 @@ class SyncEngine:
             total_conversations = len(previews)
             for index, preview in enumerate(previews, start=1):
                 try:
-                    # Report conversation start - Requirement 3.1
                     self._safe_callback(
                         progress_callback,
                         "conversation_start",
@@ -2026,27 +2023,6 @@ class SyncEngine:
                     )
 
                     await self._rate_limiter.delay_for_conversation()
-                    
-                    # Check if this conversation is already triaged with no new messages
-                    if preview.thread_url:
-                        existing = self._conversation_repo.get_by_thread_url(
-                            preview.thread_url
-                        )
-                        if (
-                            existing
-                            and existing.triaged_at is not None
-                            and existing.last_message_at is not None
-                            and existing.last_message_at <= existing.triaged_at
-                        ):
-                            if skip_triaged:
-                                logger.info(
-                                    f"Conversation '{preview.connection_name}' already triaged; skipping."
-                                )
-                                continue
-                            logger.info(
-                                f"Conversation '{preview.connection_name}' already triaged; stopping early."
-                            )
-                            break
 
                     stored, skipped, extracted_count = await self.sync_single_conversation(
                         preview, progress_callback
@@ -2073,62 +2049,119 @@ class SyncEngine:
         )
         return result
 
-    def _filter_previews_for_sync(
+    async def _collect_inbox_previews(
         self,
-        previews: list[ConversationPreview],
-        since: datetime | None,
+        limit: int | None,
+        anchor: datetime | None,
     ) -> list[ConversationPreview]:
-        """Filter previews based on sync criteria.
+        """Collect inbox previews, scrolling as needed.
 
-        Args:
-            previews: List of conversation previews to filter
-            since: Optional datetime to filter by activity date
+        Stop condition:
+            - limit set: stop when collected count >= limit (or DOM stops growing).
+            - limit None, anchor set: stop when bottom-most preview's timestamp
+              is <= anchor (or DOM stops growing).
+            - limit None, anchor None: scroll until DOM stops growing (full inbox).
 
-        Returns:
-            Filtered list of previews
-
-        Requirements:
-            - 7.1: Filter by --since date parameter
-            - 7.3: Skip conversations where last_message_at <= last_synced_at
+        Returns a deduplicated list of previews enriched with thread URLs.
+        Order matches inbox DOM order (newest first).
         """
-        filtered: list[ConversationPreview] = []
+        MAX_SCROLL_ATTEMPTS = 50
+        SCROLL_PAUSE_SECONDS = 1.2
 
-        for preview in previews:
-            # Filter by since date - Requirement 7.1
-            if since is not None and preview.timestamp is not None:
-                if preview.timestamp < since:
-                    logger.debug(
-                        f"Skipping '{preview.connection_name}': "
-                        f"timestamp {preview.timestamp} < since {since}"
-                    )
+        previews: list[ConversationPreview] = []
+        seen_urls: set[str] = set()
+        seen_names: set[str] = set()
+        prev_dom_count = -1
+
+        for attempt in range(MAX_SCROLL_ATTEMPTS):
+            snapshot = await self._get_accessibility_snapshot()
+            if not snapshot:
+                logger.warning("Empty accessibility snapshot from inbox")
+                break
+
+            current = self._inbox_extractor.extract_previews(snapshot)
+            if current:
+                await self._enrich_with_thread_urls(current)
+
+            # Merge into accumulated list, deduping by thread_url (fall back to name).
+            for p in current:
+                key = p.thread_url or f"name:{p.connection_name}"
+                seen_set = seen_urls if p.thread_url else seen_names
+                if key in seen_set:
                     continue
+                seen_set.add(key)
+                previews.append(p)
 
-            # Check if conversation needs sync - Requirement 7.3
-            # This requires looking up existing conversation in DB
-            if preview.thread_url:
-                slug = self._connection_extractor.parse_slug_from_url(preview.thread_url)
-                if slug:
-                    existing_conn = self._connection_repo.get_by_slug(slug)
-                    if existing_conn and existing_conn.id:
-                        existing_conv = self._conversation_repo.get_by_connection_id(
-                            existing_conn.id
-                        )
-                        if existing_conv:
-                            # Skip if already synced and no new messages
-                            if (
-                                existing_conv.last_synced_at is not None
-                                and existing_conv.last_message_at is not None
-                                and existing_conv.last_message_at <= existing_conv.last_synced_at
-                            ):
-                                logger.debug(
-                                    f"Skipping '{preview.connection_name}': "
-                                    f"already synced"
-                                )
-                                continue
+            dom_count = len(current)
+            logger.debug(
+                f"Inbox collection attempt {attempt + 1}: dom={dom_count}, "
+                f"accumulated={len(previews)} (prev_dom={prev_dom_count})"
+            )
 
-            filtered.append(preview)
+            # Stop condition: limit reached
+            if limit is not None and len(previews) >= limit:
+                logger.info(f"Reached limit of {limit} previews after {attempt + 1} scrolls")
+                break
 
-        return filtered
+            # Stop condition: anchor crossed (only when limit is None)
+            if limit is None and anchor is not None and previews:
+                # Find the bottom-most preview by timestamp (or DOM order if no ts).
+                # Inbox DOM is sorted newest-first, so the last accumulated entry
+                # corresponds to the bottom of what we've seen so far.
+                tail = previews[-1].timestamp
+                if tail is not None and tail <= anchor:
+                    logger.info(
+                        f"Anchor crossed (bottom preview {tail.isoformat()} <= anchor "
+                        f"{anchor.isoformat()}) after {attempt + 1} scrolls"
+                    )
+                    break
+
+            # No more conversations loaded — stop.
+            if dom_count == prev_dom_count and attempt > 0:
+                logger.info(f"Inbox DOM stable at {dom_count} items after {attempt + 1} attempts")
+                break
+
+            # Scroll for more.
+            try:
+                await self._scroll_inbox_down()
+            except Exception as e:
+                logger.warning(f"Inbox scroll failed: {e}")
+                break
+
+            prev_dom_count = dom_count
+            await asyncio.sleep(SCROLL_PAUSE_SECONDS)
+        else:
+            logger.info(f"Inbox collection: hit MAX_SCROLL_ATTEMPTS={MAX_SCROLL_ATTEMPTS}")
+
+        return previews
+
+    async def _scroll_inbox_down(self) -> None:
+        """Scroll the inbox list down to trigger lazy-loading of more conversations.
+
+        Mirrors _scroll_conversation_to_top: identifies the scrollable container
+        heuristically and bumps its scrollTop to the bottom.
+        """
+        _SCROLL_JS = """
+            () => {
+                // Prefer the explicit conversation list container if present.
+                const list = document.querySelector('ul');
+                if (list) {
+                    // Walk up to find a scrollable ancestor.
+                    let el = list;
+                    while (el && el !== document.body) {
+                        if (el.scrollHeight > el.clientHeight) {
+                            el.scrollTop = el.scrollHeight;
+                            return el.scrollHeight;
+                        }
+                        el = el.parentElement;
+                    }
+                }
+                // Fallback: scroll the document.
+                window.scrollTo(0, document.body.scrollHeight);
+                return document.body.scrollHeight;
+            }
+        """
+        await self._page.evaluate(_SCROLL_JS)
 
     async def sync_single_conversation(
         self,

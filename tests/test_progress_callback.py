@@ -110,17 +110,23 @@ async def test_progress_callback_invoked_for_conversation_start() -> None:
     }
     
     # Configure mock page evaluate with appropriate side effects.
-    # Call order: inbox snapshot, thread-URL enrichment (returns []), initial
-    # conversation snapshot, scroll-loop iter-1 snapshot, scroll JS (returns
-    # None), scroll-loop iter-2 snapshot (same count → breaks).
+    # Inbox-collection phase (anchor=None, limit=None → scroll until DOM stable):
+    #   iter 1: snapshot + enrich → 1 preview, prev_dom=-1, scroll → continue
+    #   iter 2: snapshot + enrich → 1 preview, dom_count==prev_dom=1 → break
+    # Conversation-sync phase:
+    #   initial snapshot, scroll iter 1 (N=1 > 0, continue), scroll JS,
+    #   scroll iter 2 (N=1, stable, break).
     mock_page.evaluate = AsyncMock(
         side_effect=[
-            inbox_snapshot,      # _get_accessibility_snapshot (inbox)
-            [],                  # _enrich_with_thread_urls (DOM querySelectorAll)
-            conversation_snapshot,  # sync_single_conversation initial snapshot
-            conversation_snapshot,  # scroll iter 1 – N=1 > previous=0, continue
-            None,                   # scroll JS
-            conversation_snapshot,  # scroll iter 2 – N=1 <= previous=1, break
+            inbox_snapshot,           # inbox iter 1 snapshot
+            [],                       # inbox iter 1 enrich URLs
+            None,                     # inbox scroll JS
+            inbox_snapshot,           # inbox iter 2 snapshot
+            [],                       # inbox iter 2 enrich URLs (stable → break)
+            conversation_snapshot,    # sync_single_conversation initial snapshot
+            conversation_snapshot,    # convo scroll-to-top iter 1
+            None,                     # convo scroll-to-top JS
+            conversation_snapshot,    # convo scroll-to-top iter 2 (stable, break)
         ]
     )
 
@@ -454,12 +460,15 @@ async def test_progress_callback_failure_does_not_break_sync() -> None:
     
     mock_page.evaluate = AsyncMock(
         side_effect=[
-            inbox_snapshot,
-            [],
-            conversation_snapshot,
-            conversation_snapshot,
-            None,
-            conversation_snapshot,
+            inbox_snapshot,           # inbox iter 1 snapshot
+            [],                       # inbox iter 1 enrich URLs
+            None,                     # inbox scroll JS
+            inbox_snapshot,           # inbox iter 2 snapshot
+            [],                       # inbox iter 2 enrich URLs (stable → break)
+            conversation_snapshot,    # sync_single_conversation initial snapshot
+            conversation_snapshot,    # convo scroll-to-top iter 1
+            None,                     # convo scroll-to-top JS
+            conversation_snapshot,    # convo scroll-to-top iter 2 (stable, break)
         ]
     )
 
@@ -565,12 +574,15 @@ async def test_sync_without_callback_works() -> None:
     
     mock_page.evaluate = AsyncMock(
         side_effect=[
-            inbox_snapshot,
-            [],
-            conversation_snapshot,
-            conversation_snapshot,
-            None,
-            conversation_snapshot,
+            inbox_snapshot,           # inbox iter 1 snapshot
+            [],                       # inbox iter 1 enrich URLs
+            None,                     # inbox scroll JS
+            inbox_snapshot,           # inbox iter 2 snapshot
+            [],                       # inbox iter 2 enrich URLs (stable → break)
+            conversation_snapshot,    # sync_single_conversation initial snapshot
+            conversation_snapshot,    # convo scroll-to-top iter 1
+            None,                     # convo scroll-to-top JS
+            conversation_snapshot,    # convo scroll-to-top iter 2 (stable, break)
         ]
     )
 

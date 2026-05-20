@@ -157,13 +157,13 @@ async def test_default_parameters_applied():
     
     Default values:
     - since: None (no filtering)
-    - limit: 50
-    
+    - limit: None (anchor-based, no forced count)
+
     **Feature: sync-command, Property 2: Parameter passing to SyncEngine**
     **Validates: Requirements 2.3**
     """
     mocks = create_mocks()
-    
+
     # Patch all the dependencies - patch where they're imported/used
     with patch('dm_bot.main.BrowserManager', return_value=mocks['browser_manager']), \
          patch('dm_bot.storage.DatabaseManager', return_value=mocks['db']), \
@@ -171,7 +171,7 @@ async def test_default_parameters_applied():
          patch('dm_bot.main.RateLimiter', return_value=mocks['rate_limiter']), \
          patch('dm_bot.main.NotificationService'), \
          patch('dm_bot.extraction.SyncEngine', return_value=mocks['sync_engine']):
-        
+
         # Execute the sync flow with default parameters
         from pathlib import Path
         try:
@@ -180,21 +180,20 @@ async def test_default_parameters_applied():
                 password="password123",
                 profile_path=Path("/tmp/test_profile"),
                 headless=False,
-                since=None,  # Default: no filtering
-                limit=50,    # Default limit
+                since=None,
+                limit=None,
             )
         except Exception:
             pass
-        
-        # Verify that sync_conversations was called with defaults
+
         assert mocks['sync_engine'].sync_conversations.called
-        
+
         call_args = mocks['sync_engine'].sync_conversations.call_args
         kwargs = call_args.kwargs
-        
+
         # Verify defaults
         assert kwargs['since'] is None
-        assert kwargs['limit'] == 50
+        assert kwargs['limit'] is None
 
 
 @pytest.mark.asyncio

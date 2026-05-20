@@ -1552,152 +1552,72 @@ async def test_property_7_sync_idempotency(
     )
 
 
-# **Feature: message-extraction, Property 9: Incremental sync filtering**
-# **Validates: Requirements 7.1, 7.2, 7.3, 7.4**
-@settings(max_examples=100, deadline=None)
-@given(
-    num_conversations=st.integers(min_value=3, max_value=10),
-    limit=st.integers(min_value=1, max_value=5),
-)
-def test_property_9_incremental_sync_filtering(
-    num_conversations: int,
-    limit: int,
-) -> None:
-    """
-    Property 9: Incremental sync filtering
-    
-    For any set of conversations with various last_message_at and last_synced_at
-    timestamps, the sync engine with --since filter should only process
-    conversations with activity after the since date, respecting the --limit
-    parameter, and processing in order of most recent activity first.
-    
-    This test verifies:
-    1. --since filter excludes older conversations
-    2. --limit parameter is respected
-    3. Conversations are processed in order of most recent activity first
-    4. Already-synced conversations are skipped
-    
-    **Validates: Requirements 7.1, 7.2, 7.3, 7.4**
-    """
-    # Create fresh instances for each test run
-    temp_db = create_temp_db()
-    mock_page = create_mock_page()
-    mock_rate_limiter = create_mock_rate_limiter()
-    mock_notifier = create_mock_notifier()
-    
-    # Create SyncEngine
-    engine = SyncEngine(
-        page=mock_page,
-        db=temp_db,
-        rate_limiter=mock_rate_limiter,
-        notifier=mock_notifier,
-    )
-    
-    # Generate conversation previews with various timestamps
-    base_time = datetime(2024, 1, 15, 10, 0, 0)
-    previews = []
-    for i in range(num_conversations):
-        timestamp = base_time + timedelta(days=i)
-        previews.append(ConversationPreview(
-            connection_name=f"Connection {i}",
-            last_message_snippet=f"Snippet {i}",
-            timestamp=timestamp,
-            thread_url=f"https://www.linkedin.com/messaging/thread/user-{i}/",
-        ))
-    
-    # Test --since filter - Requirement 7.1
-    since_date = base_time + timedelta(days=num_conversations // 2)
-    filtered = engine._filter_previews_for_sync(previews, since_date)
-    
-    # All filtered previews should have timestamp >= since_date
-    for preview in filtered:
-        if preview.timestamp is not None:
-            assert preview.timestamp >= since_date, (
-                f"Preview with timestamp {preview.timestamp} should be filtered "
-                f"(since={since_date})"
-            )
-    
-    # Test --limit parameter - Requirement 7.2
-    # Sort by timestamp descending (most recent first)
-    sorted_previews = sorted(
-        previews,
-        key=lambda p: p.timestamp or datetime.min,
-        reverse=True,
-    )
-    limited = sorted_previews[:limit]
-    assert len(limited) <= limit, f"Limit not respected: got {len(limited)}, expected <= {limit}"
-    
-    # Test ordering - Requirement 7.4
-    # Verify sorted_previews are in descending timestamp order
-    for i in range(len(sorted_previews) - 1):
-        ts1 = sorted_previews[i].timestamp or datetime.min
-        ts2 = sorted_previews[i + 1].timestamp or datetime.min
-        assert ts1 >= ts2, (
-            f"Previews not sorted by most recent first: {ts1} < {ts2}"
-        )
+# Property 9: Sync uses the latest inbound message timestamp as a global anchor
+# (replaces the previous per-conversation last_synced_at filtering).
+def test_property_9_latest_inbound_anchor() -> None:
+    """The MessageRepository exposes the timestamp of the most recent inbound
+    message, which the sync engine uses as the stop anchor by default.
 
+    Outbound messages must not affect the anchor (otherwise sending a reply
+    would mask incoming activity from upstream).
+    """
+    from dm_bot.storage import (
+        Connection,
+        ConnectionRepository,
+        Conversation,
+        ConversationRepository,
+        Message,
+        MessageRepository,
+    )
 
-# **Feature: message-extraction, Property 9: Incremental sync filtering**
-# **Validates: Requirements 7.1, 7.2, 7.3, 7.4**
-def test_property_9_skip_already_synced_conversations() -> None:
-    """
-    Property 9: Incremental sync filtering
-    
-    Tests that conversations where last_message_at <= last_synced_at are skipped.
-    
-    **Validates: Requirements 7.3**
-    """
-    # Create fresh instances for each test run
     temp_db = create_temp_db()
-    mock_page = create_mock_page()
-    mock_rate_limiter = create_mock_rate_limiter()
-    mock_notifier = create_mock_notifier()
-    
-    # Create a connection and conversation that's already synced
     conn_repo = ConnectionRepository(temp_db)
     conv_repo = ConversationRepository(temp_db)
-    
-    now = datetime.now()
-    connection = Connection(
-        linkedin_slug="already-synced-user",
-        display_name="Already Synced User",
-        profile_url="https://www.linkedin.com/in/already-synced-user/",
+    msg_repo = MessageRepository(temp_db)
+
+    now = datetime(2026, 5, 1, 10, 0, 0)
+    conn = conn_repo.upsert(Connection(
+        linkedin_slug="user-1",
+        display_name="User 1",
+        profile_url="https://www.linkedin.com/in/user-1/",
         first_seen_at=now,
         updated_at=now,
-    )
-    connection = conn_repo.upsert(connection)
-    
-    # Create conversation with last_synced_at >= last_message_at
-    conversation = Conversation(
-        connection_id=connection.id,
-        thread_url="https://www.linkedin.com/messaging/thread/already-synced-user/",
-        last_message_at=now - timedelta(hours=1),  # Message from 1 hour ago
-        last_synced_at=now,  # Synced just now
+    ))
+    conv = conv_repo.upsert(Conversation(
+        connection_id=conn.id,
+        thread_url="https://www.linkedin.com/messaging/thread/user-1/",
+        last_message_at=now,
+        last_synced_at=now,
         created_at=now,
-    )
-    conv_repo.upsert(conversation)
-    
-    # Create SyncEngine
-    engine = SyncEngine(
-        page=mock_page,
-        db=temp_db,
-        rate_limiter=mock_rate_limiter,
-        notifier=mock_notifier,
-    )
-    
-    # Create preview for the already-synced conversation
-    preview = ConversationPreview(
-        connection_name="Already Synced User",
-        last_message_snippet="Old message",
-        timestamp=now - timedelta(hours=1),
-        thread_url="https://www.linkedin.com/messaging/thread/already-synced-user/",
-    )
-    
-    # Filter should exclude this conversation - Requirement 7.3
-    filtered = engine._filter_previews_for_sync([preview], None)
-    
-    assert len(filtered) == 0, (
-        "Already-synced conversation should be filtered out"
+    ))
+
+    # No messages yet → anchor is None
+    assert msg_repo.get_latest_inbound_timestamp() is None
+
+    inbound_early = now
+    inbound_late = now + timedelta(hours=2)
+    outbound_later = now + timedelta(hours=5)
+
+    for ts, direction in [
+        (inbound_early, "inbound"),
+        (inbound_late, "inbound"),
+        (outbound_later, "outbound"),
+    ]:
+        msg_repo.store(Message(
+            conversation_id=conv.id,
+            content=f"msg-{ts.isoformat()}-{direction}",
+            timestamp=ts,
+            direction=direction,
+            synced_at=ts,
+            dedup_key=MessageRepository.generate_dedup_key(
+                conv.id, ts, f"msg-{ts.isoformat()}-{direction}", direction
+            ),
+        ))
+
+    anchor = msg_repo.get_latest_inbound_timestamp()
+    assert anchor == inbound_late, (
+        f"Anchor must be the latest INBOUND timestamp, ignoring outbound. "
+        f"Got {anchor}, expected {inbound_late}"
     )
 
 

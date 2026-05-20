@@ -1132,6 +1132,29 @@ class MessageRepository:
             logger.error(f"Failed to get messages by conversation: {e}")
             raise StorageError(f"Failed to get messages by conversation: {e}") from e
 
+    def get_latest_inbound_timestamp(self) -> datetime | None:
+        """Return the timestamp of the most recent inbound message across all conversations.
+
+        Used by sync as the high-water mark: any inbox preview newer than this
+        anchor needs to be re-synced. Returns None if no inbound messages exist
+        (first sync).
+        """
+        conn = self._db.connect()
+        try:
+            cursor = conn.execute(
+                "SELECT MAX(timestamp) FROM message WHERE direction = 'inbound'"
+            )
+            row = cursor.fetchone()
+            if row is None or row[0] is None:
+                return None
+            value = row[0]
+            if isinstance(value, datetime):
+                return value
+            return datetime.fromisoformat(value)
+        except sqlite3.Error as e:
+            logger.error(f"Failed to get latest inbound timestamp: {e}")
+            raise StorageError(f"Failed to get latest inbound timestamp: {e}") from e
+
 
 # =============================================================================
 # Attachment Repository

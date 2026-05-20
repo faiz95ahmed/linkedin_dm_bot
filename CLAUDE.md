@@ -18,7 +18,7 @@ Career files live at `~/CAREER/` (outside this repo, not git-tracked). Always ch
 **CLI reference:**
 
 ```bash
-dm-bot [--env-file PATH] sync [--since DATE] [--limit N] [--skip-triaged]  # sync conversations from LinkedIn
+dm-bot [--env-file PATH] sync [--since DATE] [--limit N]    # sync conversations from LinkedIn
 dm-bot [--env-file PATH] sync-conversation URL              # sync a single conversation by URL
 dm-bot inbox [--since N] [--limit N] [--untriaged]         # list recent conversations
 dm-bot conversation <id>                                    # print full thread
@@ -29,14 +29,16 @@ dm-bot triage --all                                         # triage all untriag
 dm-bot [--env-file PATH] send-message <id> "..."            # send DM to a conversation
 ```
 
-**`--env-file` / `-e`:** top-level flag on `dm-bot` (placed before the subcommand). Loads the given `.env` so `LI_USER` / `LI_PASS` are available regardless of cwd. Use this from Claude Code: `uv run dm-bot --env-file /Users/faiz/linkedin_dm_bot/.env sync --limit 20`. The cron entry sources `.env` via `set -a && . .env` from within the project dir; `--env-file` is the equivalent for interactive/manual runs.
+**`--env-file` / `-e`:** top-level flag on `dm-bot` (placed before the subcommand). Loads the given `.env` so `LI_USER` / `LI_PASS` are available regardless of cwd. Use this from Claude Code: `uv run dm-bot --env-file /Users/faiz/linkedin_dm_bot/.env sync`. The cron entry sources `.env` via `set -a && . .env` from within the project dir; `--env-file` is the equivalent for interactive/manual runs.
 
-**`--skip-triaged` / `-F`:** on `sync`. By default, sync stops at the first already-triaged conversation with no new activity — efficient for routine cron runs. With `--skip-triaged`, sync walks the full `--limit` window and skips triaged conversations individually. Useful when the inbox order has changed (e.g. an old conversation got bumped up by a new message lower in the list) or when you want to backfill missed conversations.
+**Sync stop semantics:**
+- **Default (no `--limit`):** sync walks the inbox (scrolling to load more conversations as needed) until it crosses the timestamp of the most recent inbound message already stored in the DB. Anything newer than that anchor is re-synced. This is the right mode for cron and normal use — re-running is cheap and self-correcting.
+- **`--limit N`:** sync walks exactly N conversations from the top of the inbox regardless of the anchor. Use for forced backfills, or if you suspect the anchor is wrong.
 
-**Cron usage:** `uv run dm-bot sync --limit 20` — syncs incrementally using `last_synced_at` per conversation. Safe to run repeatedly; only conversations with new messages are re-synced.
+**Cron usage:** `uv run dm-bot sync` — anchor-driven, walks until it catches up.
 
 **Workflow:**
-1. `uv run dm-bot sync --limit N` — pull latest conversations
+1. `uv run dm-bot sync` — pull latest conversations (anchor mode)
 2. `uv run dm-bot inbox --untriaged` — review conversations needing attention
 3. `uv run dm-bot conversation <id>` — read a specific thread
 4. `uv run dm-bot triage <id> [id...]` — mark handled conversations as triaged
@@ -95,15 +97,17 @@ gws calendar +insert --summary "..." --start "2026-03-29T10:00:00" --end "2026-0
 
 Always use the `career` CLI, never raw SQL against `~/CAREER/career.db`:
 
+**Addressing:** leads are referenced by a unique `<slug>` (not the numeric id); process stages are referenced as `<lead-slug>.<str_id>` (the bracketed handle shown in `lead show` / `process list`, e.g. `tomoro-ai.1822`). `process update` only accepts that composite ref — a bare number is rejected, so you can't accidentally hit the wrong stage. `lead create` requires `--slug` (must be unique). `CAREER_DB=/path/to/copy.db` overrides the DB path for safe testing.
+
 ```bash
 uv run career pipeline                                  # dashboard of active leads
 uv run career lead list [--status active|declined|closed|on_hold|offer_accepted]
-uv run career lead show <id>                            # details + process stages
-uv run career lead create --company ... --role ... --source linkedin|email|offline --source-ref ... [--salary-min N --salary-max N] --notes "..."
-uv run career lead update <id> [--status ... --notes ... --salary-max N --company ... --role ...]
-uv run career process add <lead_id> --stage <stage> [--scheduled ISO8601] [--notes ...]
-uv run career process list <lead_id>
-uv run career process update <process_id> [--status ... --outcome ... --notes ... --scheduled ISO8601]
+uv run career lead show <slug>                          # details + process stages (shows [slug.str_id] handles)
+uv run career lead create --company ... --role ... --slug <unique-slug> --source linkedin|email|offline --source-ref ... [--salary-min N --salary-max N] --notes "..."
+uv run career lead update <slug> [--status ... --notes ... --salary-max N --company ... --role ...]
+uv run career process add <slug> --stage <stage> [--scheduled ISO8601] [--notes ...]
+uv run career process list <slug>
+uv run career process update <slug>.<str_id> [--status ... --outcome ... --notes ... --scheduled ISO8601]
 ```
 
 Valid stages: `initial_call`, `recruiter_screen`, `hiring_manager`, `technical_interview`, `take_home`, `onsite`, `final_round`, `offer`, `negotiation`

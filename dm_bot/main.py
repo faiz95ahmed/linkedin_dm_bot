@@ -503,11 +503,12 @@ def sync(
         help="Only sync conversations with activity after this date (ISO format: YYYY-MM-DD)",
         formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"],
     ),
-    limit: int = typer.Option(
-        50,
+    limit: Optional[int] = typer.Option(
+        None,
         "--limit",
         "-l",
-        help="Maximum number of conversations to sync",
+        help="Sync exactly this many conversations from the top of the inbox, "
+             "scrolling as needed. Overrides the default anchor-based stop.",
     ),
     profile_path: Optional[Path] = typer.Option(
         None,
@@ -515,24 +516,15 @@ def sync(
         "-p",
         help="Path to browser profile directory",
     ),
-    skip_triaged: bool = typer.Option(
-        False,
-        "--skip-triaged",
-        "-F",
-        help="Walk all --limit conversations, skipping individually-triaged ones with no new activity. "
-             "Default is to stop the whole sync at the first such conversation.",
-    ),
 ) -> None:
     """
     Sync conversations and messages from LinkedIn to local database.
 
-    This command navigates to the LinkedIn messaging inbox, extracts
-    conversation previews, and syncs messages to the local SQLite database.
-    Supports incremental sync with --since and --limit options.
-
-    Requirements:
-        - 7.1: Filter by --since date parameter
-        - 7.2: Respect --limit parameter
+    By default, walks the inbox (scrolling as needed) until it crosses the
+    timestamp of the most recent inbound message already in the database
+    — i.e. only conversations with newer activity than what's been seen.
+    With --limit N, walks exactly N conversations from the top of the inbox
+    regardless of the anchor.
     """
     # Set up logging
     setup_logging(command="sync")
@@ -550,22 +542,22 @@ def sync(
 
     if since:
         logger.info(f"Filtering conversations since: {since}")
-    logger.info(f"Limit: {limit} conversations")
-    if skip_triaged:
-        logger.info("Skip-triaged mode: will walk all conversations, skipping already-triaged.")
+    if limit is not None:
+        logger.info(f"Limit: {limit} conversations (forced; anchor ignored)")
+    else:
+        logger.info("Limit: anchor-based (stop at latest inbound message timestamp)")
 
     # Run async sync flow, headless with automatic non-headless fallback
-    asyncio.run(run_with_headless_fallback(_sync_flow, profile_path, username, password, since=since, limit=limit, skip_triaged=skip_triaged))
+    asyncio.run(run_with_headless_fallback(_sync_flow, profile_path, username, password, since=since, limit=limit))
 
 
 async def _sync_flow(
     username: str,
     password: str,
     since: Optional[datetime],
-    limit: int,
+    limit: Optional[int],
     profile_path: Path = PROFILE_PATH,
     headless: bool = True,
-    skip_triaged: bool = False,
 ) -> None:
     """
     Async implementation of sync flow.
@@ -680,16 +672,18 @@ async def _sync_flow(
                 )
         
         # Run sync with progress callback
-        typer.echo(f"\nSyncing conversations (limit: {limit})...")
+        if limit is not None:
+            typer.echo(f"\nSyncing conversations (limit: {limit}, forced)...")
+        else:
+            typer.echo("\nSyncing conversations (anchor: latest inbound message)...")
         if since:
             typer.echo(f"Filtering conversations since: {since.strftime('%Y-%m-%d')}")
         typer.echo("")  # Blank line before progress
-        
+
         result = await sync_engine.sync_conversations(
             since=since,
             limit=limit,
             progress_callback=progress_callback,
-            skip_triaged=skip_triaged,
         )
         
         # Display final summary using ProgressReporter - Requirement 1.3
