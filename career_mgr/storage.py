@@ -1,6 +1,8 @@
 """Data storage models and database manager for career lead tracking."""
 
 import logging
+import os
+import secrets
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,8 +28,10 @@ ProcessStage = Literal[
 ]
 ProcessStatus = Literal["upcoming", "completed", "cancelled", "rescheduled", "no_show"]
 
-# Default DB path
-DEFAULT_DB_PATH: Path = Path.home() / "CAREER" / "career.db"
+# Default DB path. Override with CAREER_DB (e.g. to test against a copy).
+DEFAULT_DB_PATH: Path = Path(
+    os.environ.get("CAREER_DB", str(Path.home() / "CAREER" / "career.db"))
+)
 
 
 # =============================================================================
@@ -38,6 +42,7 @@ DEFAULT_DB_PATH: Path = Path.home() / "CAREER" / "career.db"
 class Lead(BaseModel):
     company: str
     role_title: str
+    slug: str
     created_at: datetime
     updated_at: datetime
     status: LeadStatus = "active"
@@ -56,6 +61,7 @@ class Process(BaseModel):
     stage: ProcessStage
     created_at: datetime
     updated_at: datetime
+    str_id: str | None = None  # 4-hex handle, unique within a lead; assigned at create()
     status: ProcessStatus = "upcoming"
     id: int | None = None
     scheduled_at: datetime | None = None
@@ -106,6 +112,7 @@ class CareerDatabaseManager:
     _SCHEMA_SQL = """
         CREATE TABLE IF NOT EXISTS lead (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug            TEXT    NOT NULL UNIQUE,
             company         TEXT    NOT NULL,
             role_title      TEXT    NOT NULL,
             source          TEXT    CHECK (source IN ('linkedin', 'email', 'offline')),
@@ -127,6 +134,7 @@ class CareerDatabaseManager:
         CREATE TABLE IF NOT EXISTS process (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             lead_id         INTEGER NOT NULL,
+            str_id          TEXT    NOT NULL,
             sequence        INTEGER NOT NULL,
             stage           TEXT    NOT NULL
                             CHECK (stage IN (
@@ -142,7 +150,8 @@ class CareerDatabaseManager:
             created_at      DATETIME NOT NULL,
             updated_at      DATETIME NOT NULL,
             FOREIGN KEY (lead_id) REFERENCES lead(id),
-            UNIQUE (lead_id, sequence)
+            UNIQUE (lead_id, sequence),
+            UNIQUE (lead_id, str_id)
         );
 
         CREATE INDEX IF NOT EXISTS idx_process_lead_id      ON process(lead_id);
@@ -199,12 +208,13 @@ class LeadRepository:
         try:
             cursor = conn.execute(
                 """
-                INSERT INTO lead (company, role_title, source, source_ref, status,
+                INSERT INTO lead (slug, company, role_title, source, source_ref, status,
                                   salary_min, salary_max, salary_currency, notes,
                                   created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    lead.slug,
                     lead.company,
                     lead.role_title,
                     lead.source,
@@ -228,7 +238,7 @@ class LeadRepository:
         try:
             cursor = conn.execute(
                 """
-                SELECT id, company, role_title, source, source_ref, status,
+                SELECT id, slug, company, role_title, source, source_ref, status,
                        salary_min, salary_max, salary_currency, notes,
                        created_at, updated_at
                 FROM lead WHERE id = ?
@@ -238,14 +248,28 @@ class LeadRepository:
             row = cursor.fetchone()
             if row is None:
                 return None
-            return Lead(
-                id=row[0], company=row[1], role_title=row[2], source=row[3],
-                source_ref=row[4], status=row[5], salary_min=row[6],
-                salary_max=row[7], salary_currency=row[8], notes=row[9],
-                created_at=row[10], updated_at=row[11],
-            )
+            return self._row_to_lead(row)
         except sqlite3.Error as e:
             raise CareerStorageError(f"Failed to get lead: {e}") from e
+
+    def get_by_slug(self, slug: str) -> Lead | None:
+        conn = self._db.connect()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT id, slug, company, role_title, source, source_ref, status,
+                       salary_min, salary_max, salary_currency, notes,
+                       created_at, updated_at
+                FROM lead WHERE slug = ?
+                """,
+                (slug,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return self._row_to_lead(row)
+        except sqlite3.Error as e:
+            raise CareerStorageError(f"Failed to get lead by slug: {e}") from e
 
     def update(self, lead_id: int, **fields: object) -> Lead:
         lead = self.get_by_id(lead_id)
@@ -272,7 +296,7 @@ class LeadRepository:
         try:
             cursor = conn.execute(
                 """
-                SELECT id, company, role_title, source, source_ref, status,
+                SELECT id, slug, company, role_title, source, source_ref, status,
                        salary_min, salary_max, salary_currency, notes,
                        created_at, updated_at
                 FROM lead WHERE status = ? ORDER BY updated_at DESC
@@ -288,7 +312,7 @@ class LeadRepository:
         try:
             cursor = conn.execute(
                 """
-                SELECT id, company, role_title, source, source_ref, status,
+                SELECT id, slug, company, role_title, source, source_ref, status,
                        salary_min, salary_max, salary_currency, notes,
                        created_at, updated_at
                 FROM lead ORDER BY updated_at DESC
@@ -301,10 +325,10 @@ class LeadRepository:
     @staticmethod
     def _row_to_lead(row: tuple) -> Lead:
         return Lead(
-            id=row[0], company=row[1], role_title=row[2], source=row[3],
-            source_ref=row[4], status=row[5], salary_min=row[6],
-            salary_max=row[7], salary_currency=row[8], notes=row[9],
-            created_at=row[10], updated_at=row[11],
+            id=row[0], slug=row[1], company=row[2], role_title=row[3], source=row[4],
+            source_ref=row[5], status=row[6], salary_min=row[7],
+            salary_max=row[8], salary_currency=row[9], notes=row[10],
+            created_at=row[11], updated_at=row[12],
         )
 
 
@@ -317,38 +341,62 @@ class ProcessRepository:
     def __init__(self, db: CareerDatabaseManager) -> None:
         self._db = db
 
+    @staticmethod
+    def _gen_str_id() -> str:
+        """4-hex-char handle, unique within a lead (enforced by UNIQUE constraint)."""
+        return f"{secrets.randbelow(0x10000):04x}"
+
     def create(self, process: Process) -> Process:
         conn = self._db.connect()
-        try:
-            cursor = conn.execute(
-                """
-                INSERT INTO process (lead_id, sequence, stage, scheduled_at, status,
-                                     outcome, notes, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    process.lead_id,
-                    process.sequence,
-                    process.stage,
-                    process.scheduled_at,
-                    process.status,
-                    process.outcome,
-                    process.notes,
-                    process.created_at,
-                    process.updated_at,
-                ),
-            )
-            conn.commit()
-            return process.model_copy(update={"id": cursor.lastrowid})
-        except sqlite3.Error as e:
-            raise CareerStorageError(f"Failed to create process: {e}") from e
+        # str_id must be unique per (lead_id, str_id). Collisions within a lead's
+        # handful of stages are vanishingly rare in a 65k space; retry a few times.
+        last_err: sqlite3.IntegrityError | None = None
+        for _ in range(10):
+            str_id = process.str_id or self._gen_str_id()
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO process (lead_id, str_id, sequence, stage, scheduled_at,
+                                         status, outcome, notes, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        process.lead_id,
+                        str_id,
+                        process.sequence,
+                        process.stage,
+                        process.scheduled_at,
+                        process.status,
+                        process.outcome,
+                        process.notes,
+                        process.created_at,
+                        process.updated_at,
+                    ),
+                )
+                conn.commit()
+                return process.model_copy(
+                    update={"id": cursor.lastrowid, "str_id": str_id}
+                )
+            except sqlite3.IntegrityError as e:
+                last_err = e
+                if process.str_id is not None:
+                    # Caller pinned the str_id (e.g. migration) — don't silently retry.
+                    raise CareerStorageError(
+                        f"Failed to create process (str_id {str_id} taken): {e}"
+                    ) from e
+                continue  # auto-generated collision: try a new str_id
+            except sqlite3.Error as e:
+                raise CareerStorageError(f"Failed to create process: {e}") from e
+        raise CareerStorageError(
+            f"Failed to create process after 10 str_id attempts: {last_err}"
+        )
 
     def get_by_id(self, process_id: int) -> Process | None:
         conn = self._db.connect()
         try:
             cursor = conn.execute(
                 """
-                SELECT id, lead_id, sequence, stage, scheduled_at, status,
+                SELECT id, lead_id, str_id, sequence, stage, scheduled_at, status,
                        outcome, notes, created_at, updated_at
                 FROM process WHERE id = ?
                 """,
@@ -366,7 +414,7 @@ class ProcessRepository:
         try:
             cursor = conn.execute(
                 """
-                SELECT id, lead_id, sequence, stage, scheduled_at, status,
+                SELECT id, lead_id, str_id, sequence, stage, scheduled_at, status,
                        outcome, notes, created_at, updated_at
                 FROM process WHERE lead_id = ? ORDER BY sequence ASC
                 """,
@@ -401,7 +449,7 @@ class ProcessRepository:
         try:
             cursor = conn.execute(
                 """
-                SELECT id, lead_id, sequence, stage, scheduled_at, status,
+                SELECT id, lead_id, str_id, sequence, stage, scheduled_at, status,
                        outcome, notes, created_at, updated_at
                 FROM process WHERE status = 'upcoming'
                 ORDER BY scheduled_at ASC NULLS LAST
@@ -419,10 +467,28 @@ class ProcessRepository:
         )
         return cursor.fetchone()[0]  # type: ignore[index]
 
+    def get_by_lead_and_str_id(self, lead_id: int, str_id: str) -> Process | None:
+        conn = self._db.connect()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT id, lead_id, str_id, sequence, stage, scheduled_at, status,
+                       outcome, notes, created_at, updated_at
+                FROM process WHERE lead_id = ? AND str_id = ?
+                """,
+                (lead_id, str_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return self._row_to_process(row)
+        except sqlite3.Error as e:
+            raise CareerStorageError(f"Failed to get process by str_id: {e}") from e
+
     @staticmethod
     def _row_to_process(row: tuple) -> Process:
         return Process(
-            id=row[0], lead_id=row[1], sequence=row[2], stage=row[3],
-            scheduled_at=row[4], status=row[5], outcome=row[6], notes=row[7],
-            created_at=row[8], updated_at=row[9],
+            id=row[0], lead_id=row[1], str_id=row[2], sequence=row[3], stage=row[4],
+            scheduled_at=row[5], status=row[6], outcome=row[7], notes=row[8],
+            created_at=row[9], updated_at=row[10],
         )

@@ -37,6 +37,41 @@ def _get_repos() -> tuple[CareerDatabaseManager, LeadRepository, ProcessReposito
     return db, LeadRepository(db), ProcessRepository(db)
 
 
+def _resolve_lead(leads_repo: LeadRepository, slug: str, db: CareerDatabaseManager):
+    """Look up a lead by slug, or exit with an error."""
+    lead = leads_repo.get_by_slug(slug)
+    if lead is None:
+        typer.echo(f"Lead '{slug}' not found.", err=True)
+        db.close()
+        raise typer.Exit(code=1)
+    return lead
+
+
+def _resolve_process(
+    leads_repo: LeadRepository,
+    process_repo: ProcessRepository,
+    ref: str,
+    db: CareerDatabaseManager,
+):
+    """Resolve a '{lead-slug}.{str_id}' reference to (lead, process), or exit."""
+    if "." not in ref:
+        typer.echo(
+            f"Invalid process ref '{ref}'. Use the form '<lead-slug>.<str_id>' "
+            "(see `career lead show <slug>`).",
+            err=True,
+        )
+        db.close()
+        raise typer.Exit(code=1)
+    slug, _, str_id = ref.rpartition(".")
+    lead = _resolve_lead(leads_repo, slug, db)
+    proc = process_repo.get_by_lead_and_str_id(lead.id, str_id)  # type: ignore[arg-type]
+    if proc is None:
+        typer.echo(f"No stage '{str_id}' on lead '{slug}'.", err=True)
+        db.close()
+        raise typer.Exit(code=1)
+    return lead, proc
+
+
 # =============================================================================
 # Lead commands
 # =============================================================================
@@ -46,6 +81,7 @@ def _get_repos() -> tuple[CareerDatabaseManager, LeadRepository, ProcessReposito
 def lead_create(
     company: str = typer.Option(..., help="Company name"),
     role: str = typer.Option(..., help="Role title"),
+    slug: str = typer.Option(..., help="Unique short handle for referencing this lead (e.g. 'tomoro')"),
     source: Optional[str] = typer.Option(None, help="Source: linkedin, email, offline"),
     source_ref: Optional[str] = typer.Option(None, help="Source reference (e.g. conversation ID)"),
     salary_min: Optional[int] = typer.Option(None, help="Min salary in thousands"),
@@ -58,11 +94,16 @@ def lead_create(
     from career_mgr.storage import Lead
 
     db, leads, _ = _get_repos()
+    if leads.get_by_slug(slug) is not None:
+        typer.echo(f"Slug '{slug}' is already in use. Choose another.", err=True)
+        db.close()
+        raise typer.Exit(code=1)
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     lead = leads.create(
         Lead(
             company=company,
             role_title=role,
+            slug=slug,
             source=source,  # type: ignore[arg-type]
             source_ref=source_ref,
             status=status,  # type: ignore[arg-type]
@@ -74,7 +115,7 @@ def lead_create(
             updated_at=now,
         )
     )
-    typer.echo(f"Created lead #{lead.id}: {lead.company} — {lead.role_title}")
+    typer.echo(f"Created lead {lead.slug}: {lead.company} — {lead.role_title}")
     db.close()
 
 
@@ -102,7 +143,7 @@ def lead_list(
             salary = f"  {lead.salary_currency} {lo}–{hi}"
         src = f"  [{lead.source}]" if lead.source else ""
         typer.echo(
-            f"#{lead.id}  {lead.company} — {lead.role_title}  "
+            f"{lead.slug}  {lead.company} — {lead.role_title}  "
             f"({lead.status}){salary}{src}"
         )
     db.close()
@@ -110,7 +151,7 @@ def lead_list(
 
 @lead_app.command("update")
 def lead_update(
-    lead_id: int = typer.Argument(..., help="Lead ID"),
+    slug: str = typer.Argument(..., help="Lead slug"),
     status: Optional[str] = typer.Option(None, help="New status"),
     notes: Optional[str] = typer.Option(None, help="Notes (replaces existing)"),
     salary_min: Optional[int] = typer.Option(None, help="Min salary in thousands"),
@@ -120,6 +161,7 @@ def lead_update(
 ) -> None:
     """Update a lead."""
     db, leads_repo, _ = _get_repos()
+    lead = _resolve_lead(leads_repo, slug, db)
     fields: dict[str, object] = {}
     if status is not None:
         fields["status"] = status
@@ -140,10 +182,13 @@ def lead_update(
         return
 
     try:
-        lead = leads_repo.update(lead_id, **fields)
-        typer.echo(f"Updated lead #{lead.id}: {lead.company} — {lead.role_title} ({lead.status})")
+        updated = leads_repo.update(lead.id, **fields)  # type: ignore[arg-type]
+        typer.echo(
+            f"Updated lead {updated.slug}: {updated.company} — "
+            f"{updated.role_title} ({updated.status})"
+        )
     except LeadNotFoundError:
-        typer.echo(f"Lead #{lead_id} not found.", err=True)
+        typer.echo(f"Lead '{slug}' not found.", err=True)
         raise typer.Exit(code=1)
     finally:
         db.close()
@@ -151,17 +196,13 @@ def lead_update(
 
 @lead_app.command("show")
 def lead_show(
-    lead_id: int = typer.Argument(..., help="Lead ID"),
+    slug: str = typer.Argument(..., help="Lead slug"),
 ) -> None:
     """Show details of a single lead."""
     db, leads_repo, process_repo = _get_repos()
-    lead = leads_repo.get_by_id(lead_id)
-    if lead is None:
-        typer.echo(f"Lead #{lead_id} not found.", err=True)
-        db.close()
-        raise typer.Exit(code=1)
+    lead = _resolve_lead(leads_repo, slug, db)
 
-    typer.echo(f"#{lead.id}  {lead.company} — {lead.role_title}")
+    typer.echo(f"{lead.slug}  {lead.company} — {lead.role_title}")
     typer.echo(f"Status: {lead.status}")
     if lead.source:
         ref = f" (ref: {lead.source_ref})" if lead.source_ref else ""
@@ -175,13 +216,14 @@ def lead_show(
     typer.echo(f"Created: {_utc_to_local(lead.created_at):%Y-%m-%d %H:%M}")
     typer.echo(f"Updated: {_utc_to_local(lead.updated_at):%Y-%m-%d %H:%M}")
 
-    stages = process_repo.get_stages_for_lead(lead_id)
+    stages = process_repo.get_stages_for_lead(lead.id)  # type: ignore[arg-type]
     if stages:
         typer.echo("\nProcess:")
         for s in stages:
             sched = f"  @ {_utc_to_local(s.scheduled_at):%Y-%m-%d %H:%M}" if s.scheduled_at else ""
             outcome = f"  -> {s.outcome}" if s.outcome else ""
-            typer.echo(f"  {s.sequence}. {s.stage} ({s.status}){sched}{outcome}")
+            ref = f"{lead.slug}.{s.str_id}"
+            typer.echo(f"  {s.sequence}. [{ref}] {s.stage} ({s.status}){sched}{outcome}")
     db.close()
 
 
@@ -192,7 +234,7 @@ def lead_show(
 
 @process_app.command("add")
 def process_add(
-    lead_id: int = typer.Argument(..., help="Lead ID"),
+    slug: str = typer.Argument(..., help="Lead slug"),
     stage: str = typer.Option(..., help="Stage name"),
     scheduled: Optional[str] = typer.Option(None, help="Scheduled datetime (ISO format)"),
     notes: Optional[str] = typer.Option(None, help="Notes"),
@@ -201,19 +243,15 @@ def process_add(
     from career_mgr.storage import Process
 
     db, leads_repo, process_repo = _get_repos()
-    lead = leads_repo.get_by_id(lead_id)
-    if lead is None:
-        typer.echo(f"Lead #{lead_id} not found.", err=True)
-        db.close()
-        raise typer.Exit(code=1)
+    lead = _resolve_lead(leads_repo, slug, db)
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    seq = process_repo.next_sequence(lead_id)
+    seq = process_repo.next_sequence(lead.id)  # type: ignore[arg-type]
     scheduled_at = datetime.fromisoformat(scheduled) if scheduled else None
 
     proc = process_repo.create(
         Process(
-            lead_id=lead_id,
+            lead_id=lead.id,  # type: ignore[arg-type]
             sequence=seq,
             stage=stage,  # type: ignore[arg-type]
             scheduled_at=scheduled_at,
@@ -223,24 +261,23 @@ def process_add(
         )
     )
     sched_str = f" @ {proc.scheduled_at:%Y-%m-%d %H:%M}" if proc.scheduled_at else ""
-    typer.echo(f"Added stage #{proc.sequence}: {proc.stage}{sched_str}")
+    typer.echo(
+        f"Added stage {lead.slug}.{proc.str_id} (#{proc.sequence}): "
+        f"{proc.stage}{sched_str}"
+    )
     db.close()
 
 
 @process_app.command("list")
 def process_list(
-    lead_id: int = typer.Argument(..., help="Lead ID"),
+    slug: str = typer.Argument(..., help="Lead slug"),
 ) -> None:
     """List process stages for a lead."""
     db, leads_repo, process_repo = _get_repos()
-    lead = leads_repo.get_by_id(lead_id)
-    if lead is None:
-        typer.echo(f"Lead #{lead_id} not found.", err=True)
-        db.close()
-        raise typer.Exit(code=1)
+    lead = _resolve_lead(leads_repo, slug, db)
 
     typer.echo(f"{lead.company} — {lead.role_title}")
-    stages = process_repo.get_stages_for_lead(lead_id)
+    stages = process_repo.get_stages_for_lead(lead.id)  # type: ignore[arg-type]
     if not stages:
         typer.echo("  No stages recorded.")
         db.close()
@@ -250,13 +287,14 @@ def process_list(
         sched = f"  @ {s.scheduled_at:%Y-%m-%d %H:%M}" if s.scheduled_at else ""
         outcome = f"  -> {s.outcome}" if s.outcome else ""
         notes = f"  ({s.notes})" if s.notes else ""
-        typer.echo(f"  {s.sequence}. {s.stage} ({s.status}){sched}{outcome}{notes}")
+        ref = f"{lead.slug}.{s.str_id}"
+        typer.echo(f"  {s.sequence}. [{ref}] {s.stage} ({s.status}){sched}{outcome}{notes}")
     db.close()
 
 
 @process_app.command("update")
 def process_update(
-    process_id: int = typer.Argument(..., help="Process stage ID"),
+    ref: str = typer.Argument(..., help="Process ref: <lead-slug>.<str_id>"),
     status: Optional[str] = typer.Option(None, help="New status"),
     outcome: Optional[str] = typer.Option(None, help="Outcome text"),
     notes: Optional[str] = typer.Option(None, help="Notes"),
@@ -265,7 +303,8 @@ def process_update(
     """Update a process stage."""
     from career_mgr.storage import ProcessNotFoundError
 
-    db, _, process_repo = _get_repos()
+    db, leads_repo, process_repo = _get_repos()
+    lead, proc = _resolve_process(leads_repo, process_repo, ref, db)
     fields: dict[str, object] = {}
     if status is not None:
         fields["status"] = status
@@ -282,10 +321,13 @@ def process_update(
         return
 
     try:
-        proc = process_repo.update(process_id, **fields)
-        typer.echo(f"Updated stage #{proc.sequence}: {proc.stage} ({proc.status})")
+        updated = process_repo.update(proc.id, **fields)  # type: ignore[arg-type]
+        typer.echo(
+            f"Updated stage {lead.slug}.{updated.str_id} (#{updated.sequence}): "
+            f"{updated.stage} ({updated.status})"
+        )
     except ProcessNotFoundError:
-        typer.echo(f"Process #{process_id} not found.", err=True)
+        typer.echo(f"Process '{ref}' not found.", err=True)
         raise typer.Exit(code=1)
     finally:
         db.close()
@@ -322,7 +364,7 @@ def pipeline() -> None:
         else:
             stage_info = "  [no stages]"
 
-        typer.echo(f"#{lead.id}  {lead.company} — {lead.role_title}{salary}{stage_info}")
+        typer.echo(f"{lead.slug}  {lead.company} — {lead.role_title}{salary}{stage_info}")
     db.close()
 
 
