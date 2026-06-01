@@ -170,6 +170,23 @@ gws gmail +send --to addr --from "Faiz Ahmed <faiz95ahmed@gmail.com>" --subject 
 gws gmail +reply --message-id MSG_ID --from "Faiz Ahmed <faiz95ahmed@gmail.com>" --body "..."       # email reply
 ```
 
+**Never ask for info that signals an attempt to identify or bypass the recruiter:**
+
+When the recruiter has not yet disclosed the end client, do not ask for any of the following:
+- Company name (or "even if confidential, what sector / stage / fund family / etc.")
+- Exact office address
+- Names of key people (hiring manager, CTO, founders)
+- Anything else that would let Faiz independently identify the client
+
+The recruiter's job is to gate-keep the client identity until they've decided to put Faiz forward. Asking these questions, even hedged with "happy to keep it confidential", reads as an attempt to find the client on LinkedIn and apply direct, cutting them out of the fee. It burns trust permanently.
+
+Acceptable substitutes when you need decision-relevant info:
+- Instead of office address → "door-to-door travel time from Euston" (lets Faiz judge commute without naming the location)
+- Instead of company name → "what level you'd pitch me at", "salary band", "in-office days", "perm vs contract", "equity structure"
+- Instead of stage/funding → can ask in general terms ("early-stage / scale-up / mature"), but don't probe for fund family, investor names, or recent round size if it would narrow to a single firm
+
+If the recruiter volunteers the company name, fine to engage with it. The rule is about *asking*.
+
 **Tailored CV filenames must not leak undisclosed client names:**
 
 When the recruiter has NOT explicitly named the end client, never embed the client name in the tailored CV filename. Use a generic descriptor instead (e.g. `resume_legaltech.docx`, `resume_aifinance.docx`, `resume_founding_eng.docx`). Only use `resume_<companyname>.docx` when the recruiter has already disclosed the company.
